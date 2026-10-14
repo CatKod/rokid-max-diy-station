@@ -1,0 +1,48 @@
+## .NET / Visual Studio
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.userosscache
+*.sln.docstates
+*.nuget.props
+*.nuget.targets
+
+## Build artifacts
+[Dd]ebug/
+[Rr]elease/
+[Bb]uild[Ll]og.*
+*.[Pp]ublish.xml
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+
+## NuGet
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/packages/build/
+*.nuget.g.props
+*.nuget.g.targets
+
+## IDEs
+.idea/
+.vscode/
+*.code-workspace
+
+## OS
+Thumbs.db
+.DS_Store
+
+## Logs / dumps
+logs/
+*.log
+*.pcap
+*.usbpcap
+
+## Local config
+appsettings.*.local.json
+secrets.json
