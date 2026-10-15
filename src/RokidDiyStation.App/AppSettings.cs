@@ -35,7 +35,7 @@ public sealed record AppSettings
     public bool Autostart { get; init; } = false;
 
     /// <summary>Start the tracker minimised to the tray.</summary>
-    public bool StartMinimised { get; init; } = true;
+    public bool StartMinimised { get; init; } = false;
 
     /// <summary>Hotkey to set the anchor.  Format: "Space" / "F1" / "Ctrl+Space".</summary>
     public string AnchorHotkey { get; init; } = "Space";

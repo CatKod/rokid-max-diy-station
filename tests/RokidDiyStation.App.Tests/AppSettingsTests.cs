@@ -23,7 +23,10 @@ public class AppSettingsTests
         Assert.Equal(0.0, s.Smoothing);
         Assert.Equal(60.0, s.FovDegrees);
         Assert.False(s.Autostart);
-        Assert.True(s.StartMinimised);
+        // Bug fix (M6.1): first launch should show the window so the
+        // user can see something happened when they double-click the
+        // exe.  Returning users can still enable "start minimised".
+        Assert.False(s.StartMinimised);
     }
 
     [Fact]

@@ -9,6 +9,7 @@ public partial class MainWindow : Window
     private readonly SettingsService _settingsService;
     private readonly AutostartService _autostart;
     private readonly TrackingService _tracking;
+    private bool _firstClose = true;
 
     public MainWindow(SettingsService settingsService, AutostartService autostart, TrackingService tracking)
     {
@@ -29,9 +30,15 @@ public partial class MainWindow : Window
     {
         // Save on close — the user might not have pressed "Save".
         try { _settingsService.Save(); } catch { }
-        // Hide instead of exit so the tray app keeps running.
-        e.Cancel = true;
-        Hide();
+        // First close: hide to tray and show a hint.  Quit() (from
+        // the tray menu) bypasses this so the window really closes.
+        if (_firstClose)
+        {
+            _firstClose = false;
+            e.Cancel = true;
+            Hide();
+            AppendLog("Window hidden.  Click the tray icon (cyan 'R') to reopen, or right-click for the menu.");
+        }
     }
 
     private void BindFromSettings()
@@ -79,6 +86,10 @@ public partial class MainWindow : Window
     {
         AppendLog("Recentred (placeholder — consumers re-derive the neutral orientation).");
     }
+
+    /// <summary>Tell the window that the next close is a real quit.
+    /// Called by <see cref="TrayApplicationContext.Quit"/>.</summary>
+    public void MarkQuitting() => _firstClose = false;
 
     private void OnSaveClick(object sender, RoutedEventArgs e)
     {

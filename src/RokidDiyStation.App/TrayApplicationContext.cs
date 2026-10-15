@@ -6,6 +6,7 @@
 using System.Windows;
 using System.Windows.Input;
 using H.NotifyIcon;
+using H.NotifyIcon.Core;
 
 namespace RokidDiyStation.App;
 
@@ -30,7 +31,7 @@ public sealed class TrayApplicationContext
         _tray = new TaskbarIcon
         {
             ToolTipText = "Rokid DiyStation — spatial anchor",
-            Icon = System.Drawing.SystemIcons.Information,
+            Icon = BuildTrayIcon(),
             Visibility = Visibility.Visible,
             NoLeftClickDelay = true,
             ContextMenu = BuildContextMenu(),
@@ -40,15 +41,8 @@ public sealed class TrayApplicationContext
         _tracking.StatusChanged += OnStatusChanged;
         _tracking.Start();
 
-        if (_settingsService.Current.StartMinimised)
-        {
-            _mainWindow.Hide();
-        }
-        else
-        {
-            ShowMainWindow();
-        }
-        _mainWindow.Loaded += (_, _) => RegisterHotkeys();
+        // The actual window show is deferred to OnApplicationStarted
+        // so the WPF dispatcher is alive.  See Program.cs.
     }
 
     private System.Windows.Controls.ContextMenu BuildContextMenu()
@@ -61,6 +55,42 @@ public sealed class TrayApplicationContext
         menu.Items.Add(new System.Windows.Controls.Separator());
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Quit", Command = new RelayCommand(_ => Quit()) });
         return menu;
+    }
+
+    private bool _started;
+
+    /// <summary>Called by Program once the WPF Application has finished
+    /// starting.  This is the safe place to <see cref="Window.Show"/>
+    /// a window: the dispatcher is running, message pump is alive.</summary>
+    public void OnApplicationStarted()
+    {
+        if (_started) return;
+        _started = true;
+        if (_settingsService.Current.StartMinimised)
+        {
+            _mainWindow.Hide();
+            _tray.ShowNotification(
+                title: "Rokid DiyStation",
+                message: "Running in the tray.  Press Space to set the anchor, or click the icon to open settings.",
+                NotificationIcon.Info);
+        }
+        else
+        {
+            ShowMainWindow();
+        }
+        RegisterHotkeys();
+    }
+
+    /// <summary>Forwarded from Application.Activated — we use this to
+    /// make sure the window is visible on first launch (the Startup
+    /// event fires before the main window has a handle).</summary>
+    public void OnApplicationActivated()
+    {
+        if (!_started) return;
+        if (!_settingsService.Current.StartMinimised && !_mainWindow.IsVisible)
+        {
+            ShowMainWindow();
+        }
     }
 
     private void OnStatusChanged(TrackingStatus s)
@@ -119,6 +149,29 @@ public sealed class TrayApplicationContext
 
     public void OnExternalShowRequested(int hwnd) => ShowMainWindow();
 
+    /// <summary>Build a small distinctive tray icon (16x16 cyan square
+    /// with a darker border).  SystemIcons.Information is too pale and
+    /// many users miss it on the taskbar; this stands out and
+    /// requires no shipped .ico file.</summary>
+    private static System.Drawing.Icon BuildTrayIcon()
+    {
+        using var bmp = new System.Drawing.Bitmap(16, 16);
+        using (var g = System.Drawing.Graphics.FromImage(bmp))
+        {
+            g.Clear(System.Drawing.Color.Transparent);
+            using var border = new System.Drawing.Pen(System.Drawing.Color.FromArgb(255, 0, 188, 212), 2);
+            using var fill   = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(255, 0, 150, 180));
+            g.FillRectangle(fill, 2, 2, 12, 12);
+            g.DrawRectangle(border, 1, 1, 13, 13);
+            // tiny "R" mark in the middle
+            using var text = new System.Drawing.Font(System.Drawing.FontFamily.GenericMonospace, 7, System.Drawing.FontStyle.Bold);
+            using var white = new System.Drawing.SolidBrush(System.Drawing.Color.White);
+            g.DrawString("R", text, white, 3, 3);
+        }
+        var hicon = bmp.GetHicon();
+        return System.Drawing.Icon.FromHandle(hicon);
+    }
+
     public void Quit()
     {
         if (_quitting) return;
@@ -129,6 +182,8 @@ public sealed class TrayApplicationContext
         try { _cHotkey?.Dispose(); } catch { }
         try { _settingsService.Save(); } catch { }
         _tray.Visibility = Visibility.Collapsed;
+        // Mark the window so its OnClosing handler won't intercept.
+        _mainWindow.MarkQuitting();
         _mainWindow.Close();
         Application.Current.Shutdown();
     }

@@ -63,6 +63,13 @@ internal static class Program
         single.OnShowRequested += _ => tray.OnExternalShowRequested(0);
         app.Exit += (_, _) => tray.Quit();
 
+        // Defer the initial window show until the WPF dispatcher is
+        // running.  Showing before Application.Run() starts the
+        // dispatcher can leave the window without a message pump and
+        // it never paints.
+        app.Startup += (_, _) => tray.OnApplicationStarted();
+        app.Activated += (_, _) => tray.OnApplicationActivated();
+
         // Run the message loop.  Quit() will call Application.Current.Shutdown().
         app.Run();
         return 0;
