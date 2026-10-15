@@ -9,7 +9,8 @@
     <RootNamespace>RokidDiyStation.App</RootNamespace>
     <AssemblyName>RokidDiyStation</AssemblyName>
     <StartupObject>RokidDiyStation.App.Program</StartupObject>
-    <ApplicationIcon />
+    <!-- Generate the tray icon before every build.  -->
+    <PreBuildEvent>powershell -NoProfile -ExecutionPolicy Bypass -File "$(MSBuildProjectDirectory)\generate-icon.ps1"</PreBuildEvent>
   </PropertyGroup>
 
   <ItemGroup>

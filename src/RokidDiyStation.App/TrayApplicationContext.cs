@@ -3,10 +3,10 @@
 // Tray application context: owns the TaskbarIcon (H.NotifyIcon.Wpf),
 // the context menu and the global hotkeys.  Constructed on the UI
 // thread so the WPF infrastructure is up before we touch it.
+using System.IO;
 using System.Windows;
 using System.Windows.Input;
 using H.NotifyIcon;
-using H.NotifyIcon.Core;
 
 namespace RokidDiyStation.App;
 
@@ -31,7 +31,7 @@ public sealed class TrayApplicationContext
         _tray = new TaskbarIcon
         {
             ToolTipText = "Rokid DiyStation — spatial anchor",
-            Icon = BuildTrayIcon(),
+            Icon = LoadTrayIcon(),
             Visibility = Visibility.Visible,
             NoLeftClickDelay = true,
             ContextMenu = BuildContextMenu(),
@@ -50,8 +50,8 @@ public sealed class TrayApplicationContext
         var menu = new System.Windows.Controls.ContextMenu();
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Open settings…", Command = new RelayCommand(_ => ShowMainWindow()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
-        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Set anchor here (Space)", Command = new RelayCommand(_ => _tracking.SetAnchorHere()) });
-        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Reset anchor (R)",       Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Set anchor here (Ctrl+Space)", Command = new RelayCommand(_ => _tracking.SetAnchorHere()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Reset anchor (Ctrl+R)",       Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Quit", Command = new RelayCommand(_ => Quit()) });
         return menu;
@@ -66,19 +66,21 @@ public sealed class TrayApplicationContext
     {
         if (_started) return;
         _started = true;
+        RegisterHotkeys();
         if (_settingsService.Current.StartMinimised)
         {
+            // Notification balloons are not always supported (and
+            // H.NotifyIcon throws if the TaskbarIcon is not yet
+            // attached to a visible owner).  We log to the status
+            // panel instead — the user can right-click the tray icon
+            // for the menu.
+            _mainWindow.AppendLog("Started minimised. Click the tray icon (cyan 'R') to open settings.");
             _mainWindow.Hide();
-            _tray.ShowNotification(
-                title: "Rokid DiyStation",
-                message: "Running in the tray.  Press Space to set the anchor, or click the icon to open settings.",
-                NotificationIcon.Info);
         }
         else
         {
             ShowMainWindow();
         }
-        RegisterHotkeys();
     }
 
     /// <summary>Forwarded from Application.Activated — we use this to
@@ -113,8 +115,8 @@ public sealed class TrayApplicationContext
     public void ShowMainWindow()
     {
         _mainWindow.Show();
-        if (_mainWindow.WindowState == WindowState.Minimized)
-            _mainWindow.WindowState = WindowState.Normal;
+        if (_mainWindow.WindowState == System.Windows.WindowState.Minimized)
+            _mainWindow.WindowState = System.Windows.WindowState.Normal;
         _mainWindow.Activate();
         _mainWindow.Topmost = true;
         _mainWindow.Topmost = false;
@@ -123,13 +125,26 @@ public sealed class TrayApplicationContext
 
     private void RegisterHotkeys()
     {
-        // Space -> set anchor, R -> reset, C -> recenter.
-        _spaceHotkey = TryHotkey(1, NativeMethods.MOD_NONE,  0x20 /* VK_SPACE */);
-        if (_spaceHotkey is not null) _spaceHotkey.Pressed += () => _tracking.SetAnchorHere();
-        _rHotkey = TryHotkey(2, NativeMethods.MOD_NONE,  0x52 /* VK_R */);
-        if (_rHotkey is not null)     _rHotkey.Pressed     += () => _tracking.ResetAnchor();
-        _cHotkey = TryHotkey(3, NativeMethods.MOD_NONE,  0x43 /* VK_C */);
-        if (_cHotkey is not null)     _cHotkey.Pressed     += () => _mainWindow.Recenter();
+        // Use Ctrl+modifier so we don't steal Space/R/C from normal typing.
+        // If registration fails (another app owns the hotkey) we log a
+        // warning but the in-window buttons still work.
+        _spaceHotkey = TryHotkey(1, NativeMethods.MOD_CTRL, 0x20 /* VK_SPACE */);
+        if (_spaceHotkey is not null)
+            _spaceHotkey.Pressed += () => _tracking.SetAnchorHere();
+        else
+            _mainWindow.AppendLog("Hotkey Ctrl+Space (set anchor) unavailable — another app may own it.");
+
+        _rHotkey = TryHotkey(2, NativeMethods.MOD_CTRL, 0x52 /* VK_R */);
+        if (_rHotkey is not null)
+            _rHotkey.Pressed += () => _tracking.ResetAnchor();
+        else
+            _mainWindow.AppendLog("Hotkey Ctrl+R (reset anchor) unavailable.");
+
+        _cHotkey = TryHotkey(3, NativeMethods.MOD_CTRL, 0x43 /* VK_C */);
+        if (_cHotkey is not null)
+            _cHotkey.Pressed += () => _mainWindow.Recenter();
+        else
+            _mainWindow.AppendLog("Hotkey Ctrl+C (recenter) unavailable.");
     }
 
     private HotkeyBinding? TryHotkey(int id, uint modifiers, uint vk)
@@ -149,27 +164,35 @@ public sealed class TrayApplicationContext
 
     public void OnExternalShowRequested(int hwnd) => ShowMainWindow();
 
-    /// <summary>Build a small distinctive tray icon (16x16 cyan square
-    /// with a darker border).  SystemIcons.Information is too pale and
-    /// many users miss it on the taskbar; this stands out and
-    /// requires no shipped .ico file.</summary>
-    private static System.Drawing.Icon BuildTrayIcon()
+    private static System.Drawing.Icon LoadTrayIcon()
     {
-        using var bmp = new System.Drawing.Bitmap(16, 16);
+        var icoPath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "..", "obj", "app.ico");
+        if (File.Exists(icoPath))
+        {
+            try { return new System.Drawing.Icon(icoPath); } catch { /* fall through */ }
+        }
+        // Fallback: build a programmatic icon (always works, no file needed).
+        using var bmp = new System.Drawing.Bitmap(32, 32);
         using (var g = System.Drawing.Graphics.FromImage(bmp))
         {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             g.Clear(System.Drawing.Color.Transparent);
-            using var border = new System.Drawing.Pen(System.Drawing.Color.FromArgb(255, 0, 188, 212), 2);
-            using var fill   = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(255, 0, 150, 180));
-            g.FillRectangle(fill, 2, 2, 12, 12);
-            g.DrawRectangle(border, 1, 1, 13, 13);
-            // tiny "R" mark in the middle
-            using var text = new System.Drawing.Font(System.Drawing.FontFamily.GenericMonospace, 7, System.Drawing.FontStyle.Bold);
+            using var fill = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(255, 0, 150, 180));
+            using var ring = new System.Drawing.Pen(System.Drawing.Color.FromArgb(255, 0, 188, 212), 3);
+            g.FillEllipse(fill, 4, 4, 23, 23);
+            g.DrawEllipse(ring, 1, 1, 29, 29);
+            using var font = new System.Drawing.Font("Segoe UI", 14, System.Drawing.FontStyle.Bold);
             using var white = new System.Drawing.SolidBrush(System.Drawing.Color.White);
-            g.DrawString("R", text, white, 3, 3);
+            var sf = new System.Drawing.StringFormat
+            {
+                Alignment = System.Drawing.StringAlignment.Center,
+                LineAlignment = System.Drawing.StringAlignment.Center,
+            };
+            g.DrawString("R", font, white, new System.Drawing.RectangleF(0, 0, 32, 32), sf);
         }
-        var hicon = bmp.GetHicon();
-        return System.Drawing.Icon.FromHandle(hicon);
+        return System.Drawing.Icon.FromHandle(bmp.GetHicon());
     }
 
     public void Quit()
