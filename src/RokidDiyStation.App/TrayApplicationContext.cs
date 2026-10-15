@@ -184,7 +184,13 @@ public sealed class TrayApplicationContext
         }
     }
 
-    public void OnExternalShowRequested(int hwnd) => ShowMainWindow();
+    public void OnExternalShowRequested(int hwnd)
+    {
+        // The pipe listener invokes this on a background thread.
+        // Show() must run on the WPF UI thread, so marshal.
+        if (_mainWindow.Dispatcher.CheckAccess()) ShowMainWindow();
+        else _mainWindow.Dispatcher.BeginInvoke(new Action(ShowMainWindow));
+    }
 
     private static System.Drawing.Icon LoadTrayIcon()
     {

@@ -9,7 +9,7 @@ public partial class MainWindow : Window
     private readonly SettingsService _settingsService;
     private readonly AutostartService _autostart;
     private readonly TrackingService _tracking;
-    private bool _firstClose = true;
+    private bool _quitting;
 
     public MainWindow(SettingsService settingsService, AutostartService autostart, TrackingService tracking)
     {
@@ -30,15 +30,16 @@ public partial class MainWindow : Window
     {
         // Save on close — the user might not have pressed "Save".
         try { _settingsService.Save(); } catch { }
-        // First close: hide to tray and show a hint.  Quit() (from
-        // the tray menu) bypasses this so the window really closes.
-        if (_firstClose)
-        {
-            _firstClose = false;
-            e.Cancel = true;
-            Hide();
-            AppendLog("Window hidden.  Click the tray icon (cyan 'R') to reopen, or right-click for the menu.");
-        }
+        // The window should never really close until Quit() is called
+        // from the tray menu — otherwise re-opening via the single-
+        // instance signal would try to Show() a disposed window and
+        // fail silently (the user reported this as a 3rd-open crash).
+        // Quit() sets _quitting via MarkQuitting() before closing so
+        // we know it's safe to actually close.
+        if (_quitting) return;
+        e.Cancel = true;
+        Hide();
+        AppendLog("Window hidden.  Ctrl+Alt+R to reopen, or click the tray icon.");
     }
 
     private void BindFromSettings()
@@ -104,7 +105,7 @@ public partial class MainWindow : Window
 
     /// <summary>Tell the window that the next close is a real quit.
     /// Called by <see cref="TrayApplicationContext.Quit"/>.</summary>
-    public void MarkQuitting() => _firstClose = false;
+    public void MarkQuitting() => _quitting = true;
 
     private void OnSaveClick(object sender, RoutedEventArgs e)
     {
