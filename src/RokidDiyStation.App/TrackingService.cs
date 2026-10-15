@@ -7,6 +7,7 @@
 // Lives in a background thread internally so the UI thread stays
 // responsive; samples arrive at 437 Hz but the UI only needs ~5 Hz
 // updates.
+using System.IO;
 using System.Numerics;
 using RokidDiyStation.Core.Fusion;
 using RokidDiyStation.Core.HidCapture;
@@ -56,6 +57,12 @@ public sealed class TrackingService : IDisposable
         _settingsService = settingsService;
         _smoother = new OrientationSmoother(settings.Smoothing);
     }
+
+    /// <summary>Where diagnostic lines are mirrored to disk so the user
+    /// can read them in Notepad even if the in-app log is unscrollable.</summary>
+    public static readonly string DiagnosticLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "RokidDiyStation", "diag.log");
 
     public void ApplySettings(AppSettings next)
     {
@@ -232,6 +239,9 @@ public sealed class TrackingService : IDisposable
     private void AppendLogSafe(string line)
     {
         try { OnLog?.Invoke(line); } catch { /* UI may be gone */ }
+        // File mirroring is handled by MainWindow.AppendLog (which
+        // appends every UI log line, DBG included).  Doing it here
+        // too would double-write the same line.
     }
 
     public void Dispose()

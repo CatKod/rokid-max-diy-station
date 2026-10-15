@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 
@@ -174,5 +175,17 @@ public partial class MainWindow : Window
         {
             LogList.ScrollIntoView(LogList.Items[^1]);
         }
+        // Mirror every UI log line to the diagnostic file too, so the
+        // user has a complete transcript in Notepad (settings save,
+        // hotkey failures, status transitions, IMU diagnostic, …).
+        try
+        {
+            var path = TrackingService.DiagnosticLogPath;
+            var dir = Path.GetDirectoryName(path)!;
+            System.IO.Directory.CreateDirectory(dir);
+            System.IO.File.AppendAllText(path,
+                $"[{DateTime.Now:HH:mm:ss.fff}] {line}{Environment.NewLine}");
+        }
+        catch { /* best-effort */ }
     }
 }

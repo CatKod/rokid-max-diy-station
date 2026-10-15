@@ -77,6 +77,7 @@ public sealed class TrayApplicationContext
         if (_started) return;
         _started = true;
         RegisterHotkeys();
+        _mainWindow.AppendLog($"Diagnostic log mirrored to: {TrackingService.DiagnosticLogPath}");
         if (_settingsService.Current.StartMinimised)
         {
             // Notification balloons are not always supported (and
