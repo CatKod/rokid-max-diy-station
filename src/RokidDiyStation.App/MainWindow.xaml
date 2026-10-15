@@ -25,7 +25,10 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0">
                     <TextBlock x:Name="StatusText" Foreground="White" FontSize="14" FontWeight="SemiBold" Text="Idle"/>
-                    <TextBlock x:Name="DetailText" Foreground="#FFB0BEC5" FontSize="11" Margin="0,4,0,0"/>
+                    <TextBlock x:Name="DetailText"  Foreground="#FFB0BEC5" FontSize="11" Margin="0,4,0,0"
+                               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="PosText"     Foreground="#FF80CBC4" FontSize="11" FontFamily="Consolas" Margin="0,2,0,0"/>
+                    <TextBlock x:Name="EulText"     Foreground="#FFFFCC80" FontSize="11" FontFamily="Consolas" Margin="0,2,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
                     <Button x:Name="SetAnchorBtn" Content="Set Anchor" Click="OnSetAnchorClick"

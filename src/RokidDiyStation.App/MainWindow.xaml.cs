@@ -71,13 +71,28 @@ public partial class MainWindow : Window
         DetailText.Text = s.State switch
         {
             TrackingState.Streaming =>
-                $"cal={(s.GyroCalibrated ? "yes" : "no")} " +
-                $"stationary={(s.IsStationary ? "yes" : "no")}  " +
-                $"pos=({s.Position.X:F3}, {s.Position.Y:F3}, {s.Position.Z:F3}) m  " +
-                $"eul=({s.Euler.RollDeg:F1}°, {s.Euler.PitchDeg:F1}°, {s.Euler.YawDeg:F1}°)",
+                $"cal={(s.GyroCalibrated ? "yes" : "no ")}  " +
+                $"stationary={(s.IsStationary ? "yes" : "no ")}",
             TrackingState.Error => s.Message,
             _ => s.Message,
         };
+        // Position is shown in metres with 3 decimals (sub-mm precision
+        // is well below the IMU noise floor, no point showing more).
+        PosText.Text = $"pos  X={s.Position.X,7:F3}  Y={s.Position.Y,7:F3}  Z={s.Position.Z,7:F3} m";
+        // Euler angles are wrapped into the canonical (-180, 180] range
+        // so the user always sees a stable number when turning the head.
+        EulText.Text = $"eul  R={WrapDeg(s.Euler.RollDeg),6:F1}°" +
+                       $"  P={WrapDeg(s.Euler.PitchDeg),6:F1}°" +
+                       $"  Y={WrapDeg(s.Euler.YawDeg),6:F1}°";
+    }
+
+    /// <summary>Wrap an angle in degrees to the canonical (-180, 180] range.</summary>
+    private static double WrapDeg(double deg)
+    {
+        deg %= 360.0;
+        if (deg >  180.0) deg -= 360.0;
+        if (deg <= -180.0) deg += 360.0;
+        return deg;
     }
 
     public void Recenter()

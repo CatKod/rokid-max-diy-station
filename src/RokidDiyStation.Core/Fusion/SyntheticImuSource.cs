@@ -115,6 +115,17 @@ public sealed class SyntheticImuSource
     /// </remarks>
     public static (float Roll, float Pitch, float Yaw) ToEulerZYX(Quaternion q)
     {
+        // Renormalize defensively — a quaternion that has drifted away
+        // from unit length (e.g. after many float-precision additions
+        // in the fusion filter) will produce Euler angles outside the
+        // canonical (-180, 180] range.  The cost is one sqrt and three
+        // multiplies, and we only do this on the 200 ms UI tick.
+        var n2 = q.X * q.X + q.Y * q.Y + q.Z * q.Z + q.W * q.W;
+        if (n2 is > 1.0001f or < 0.9999f && n2 > 0f)
+        {
+            var inv = 1f / MathF.Sqrt(n2);
+            q = new Quaternion(q.X * inv, q.Y * inv, q.Z * inv, q.W * inv);
+        }
         // From R = Ry · Rx · Rz:
         //   R[1,2] = -sin(pitch) = 2(yz - wx)   =>  pitch = -asin(2(yz - wx))
         //   R[0,2] = sin(yaw)·cos(pitch)        = 2(xz + wy)
