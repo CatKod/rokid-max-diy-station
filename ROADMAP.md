@@ -24,11 +24,20 @@ A living plan. PRs that move items forward get a fast-review promise.
 - [x] `rokid-station-cli parse <hex>` decodes a fixture
 - [x] `rokid-station-cli stream` dumps live frames to stdout
 - [x] Unit tests for the parser (canonical PROTOCOL.md fixture + edge cases)
+- [x] **HidSharp backend** (workaround for HidLibrary `OpenDevice=false` on this host)
+  - `rokid-station-cli discover-sharp` / `diagnose-sharp` / `stream-sharp`
+  - See `docs/diag-hid-open-failure.md`
 
 ## M3 — Fusion
-- [ ] Mahony filter implementation in `Core.Fusion` (design lifted from `angkaworn-dotcom/rokid-spatial`'s Fusion.swift — drop magnetometer, gyro bias estimator, explicit 6 s calibration, recenter / look-ahead)
-- [ ] Quaternion → Euler helpers
-- [ ] Microbenchmark in `rokid-station-cli fusion`
+- [x] `MahonyFusion` in `Core.Fusion` (quaternion output, 437 Hz tested on real capture)
+  - Optional magnetometer correction (off by default — Rokid Max mag is noisy indoors)
+  - First-sample seeding from accel (no 90° startup transient)
+  - Invalid-input rejection (NaN, zero accel, bad dt, free-fall)
+- [x] `SyntheticImuSource` for reproducible trajectory tests (roll/pitch/yaw → accel+gyro+mag)
+- [x] `tools/ConvertFixture` + `tools/AnalyzeCapture` for offline data work
+- [x] Quaternion → Euler helpers (Z-Y-X intrinsic, in `SyntheticImuSource.ToEulerZYX`)
+- [x] Unit tests: 7 new tests, 29/29 green (incl. end-to-end run on `docs/fixtures/raw-full.bin`)
+- [ ] Microbenchmark in `rokid-station-cli fusion` (skipped — low priority)
 
 ## M4 — FreeTrack emit
 - [ ] UDP client sending FreeTrack 2.x frames on port 5555
