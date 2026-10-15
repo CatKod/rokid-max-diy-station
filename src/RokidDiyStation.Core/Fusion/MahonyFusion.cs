@@ -68,8 +68,11 @@ public sealed class MahonyFusion
     private ulong _prevTs;
     private bool _primed;
     private int _sampleCount;
+    // Skip mag correction for the first N samples so a noisy initial
+    // reading can't yank the heading.  ~0.5s at 437 Hz.
+    private const int MagWarmupSamples = 200;
 
-    public MahonyFusion(MahonyTuning tuning = default, bool useMagnetometer = false)
+    public MahonyFusion(MahonyTuning tuning = default, bool useMagnetometer = true)
     {
         _tuning = tuning;
         _useMagnetometer = useMagnetometer;
@@ -130,7 +133,10 @@ public sealed class MahonyFusion
         var aHat = accel / accelNorm;
 
         Vector3? mHat = null;
-        if (_useMagnetometer && IsFinite(sample.Mag) && sample.Mag.LengthSquared() > 1e-3f)
+        if (_useMagnetometer
+            && _sampleCount >= MagWarmupSamples
+            && IsFinite(sample.Mag)
+            && sample.Mag.LengthSquared() > 1e-3f)
         {
             // Rotate magnetometer reading into the world frame so the
             // heading reference is in the horizontal plane only.

@@ -309,7 +309,7 @@ internal static class Program
         return 2;
     }
 
-    // ---------- M4 fusion + FreePIE UDP emit ----------
+    // ---------- M5 spatial-anchoring CLI ----------
 
     private static int FusionEmit(ReadOnlySpan<string> args)
     {
@@ -317,16 +317,60 @@ internal static class Program
         var host   = ParseStringFlag(args, "host",   fallback: "127.0.0.1") ?? "127.0.0.1";
         var port   = ParseIntFlag(args, "port",    fallback: 5555);
         var timeoutSec = ParseIntFlag(args, "timeout", fallback: 0);
+        var noHotkey = args.Contains("--no-hotkey");
 
         var opts = new FreePieEmitterOptions(
             TargetHost: host,
             TargetPort: port,
-            MaxPacketsPerSecond: 250);
+            MaxPacketsPerSecond: 250,
+            Flags: FreePieFlags.Raw | FreePieFlags.Orient,
+            IncludeRawPosition: true);
         using var emitter = new FreePieEmitter(opts);
-        var fusion = new MahonyFusion();
+        var anchor = new SpatialAnchor();
         using var cts = timeoutSec > 0 ? new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec)) : null;
+        using var keyCts = noHotkey ? null : new CancellationTokenSource();
+        using var combinedCts = CancellationTokenSource.CreateLinkedTokenSource(
+            cts?.Token ?? CancellationToken.None,
+            keyCts?.Token ?? CancellationToken.None);
 
         Console.WriteLine($"# fusion-emit -> {host}:{port}  replay={(replay ?? "<live>")}");
+        Console.WriteLine($"# hotkeys (live mode only): [Space]=set anchor here  [R]=reset  [Q]=quit  [S]=print status");
+
+        if (!noHotkey && !Console.IsInputRedirected)
+        {
+            // Background key listener.
+            _ = Task.Run(() =>
+            {
+                while (keyCts is { IsCancellationRequested: false })
+                {
+                    if (!Console.KeyAvailable)
+                    {
+                        Thread.Sleep(50);
+                        continue;
+                    }
+                    var key = Console.ReadKey(intercept: true);
+                    switch (key.Key)
+                    {
+                        case ConsoleKey.Spacebar:
+                            anchor.SetAnchorHere();
+                            Console.WriteLine($"# anchor set: pos=0  q=identity  samples={anchor.SampleCount}");
+                            break;
+                        case ConsoleKey.R:
+                            anchor.Reset();
+                            Console.WriteLine("# anchor reset (recalibrating)");
+                            break;
+                        case ConsoleKey.S:
+                            PrintAnchorStatus(anchor);
+                            break;
+                        case ConsoleKey.Q:
+                        case ConsoleKey.Escape:
+                            Console.WriteLine("# quit requested");
+                            keyCts.Cancel();
+                            break;
+                    }
+                }
+            });
+        }
 
         if (replay is not null)
         {
@@ -340,7 +384,7 @@ internal static class Program
             var n = bytes.Length / stride;
             for (var i = 0; i < n; i++)
             {
-                if (cts?.IsCancellationRequested == true) break;
+                if (combinedCts.IsCancellationRequested) break;
                 var off = i * stride;
                 var sample = new ImuSample(
                     BitConverter.ToUInt64(bytes, off),
@@ -358,8 +402,8 @@ internal static class Program
                         BitConverter.ToSingle(bytes, off + 40)),
                     bytes[off + 44] != 0,
                     0);
-                fusion.Update(sample);
-                emitter.Send(fusion.Orientation);
+                anchor.Update(sample);
+                emitter.Send(anchor.HeadOrientation, anchor.HeadPosition);
             }
             Console.WriteLine($"# sent {emitter.PacketsSent} packets, {emitter.PacketsFailed} failed");
             return 0;
@@ -369,18 +413,27 @@ internal static class Program
         using var device = HidSharpEnumerator.OpenFirst();
         Console.WriteLine($"# streaming from {device.ProductName} (VID=0x{device.VendorId:X4} PID=0x{device.ProductId:X4})");
         var total = 0;
-        while (true)
+        while (!combinedCts.IsCancellationRequested)
         {
-            if (cts?.IsCancellationRequested == true) break;
             if (!device.TryRead(timeoutMs: 100, out var report)) continue;
             var result = PacketParser.Parse(report);
             if (!result.IsOk) continue;
-            fusion.Update(result.Value);
-            emitter.Send(fusion.Orientation);
+            anchor.Update(result.Value);
+            emitter.Send(anchor.HeadOrientation, anchor.HeadPosition);
             total++;
         }
         Console.WriteLine($"# sent {emitter.PacketsSent} packets ({emitter.PacketsFailed} failed) over {total} live samples");
         return 0;
+    }
+
+    private static void PrintAnchorStatus(SpatialAnchor a)
+    {
+        var (roll, pitch, yaw) = SyntheticImuSource.ToEulerZYX(a.HeadOrientation);
+        Console.WriteLine($"# state={a.State} samples={a.SampleCount} " +
+                          $"gyroCal={a.IsGyroCalibrated}({a.CalibrationProgress}) " +
+                          $"stationary={a.IsStationary} bias={a.GyroBias} " +
+                          $"pos=({a.HeadPosition.X:F3},{a.HeadPosition.Y:F3},{a.HeadPosition.Z:F3})m " +
+                          $"eul=({roll:F1}°,{pitch:F1}°,{yaw:F1}°)");
     }
 
     private static string? ParseStringFlag(ReadOnlySpan<string> args, string name, string? fallback)

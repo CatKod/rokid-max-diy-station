@@ -49,7 +49,20 @@ A living plan. PRs that move items forward get a fast-review promise.
       recipe; not yet tested with a live game)
 - [ ] Verify in Star Citizen / DCS World / IL-2 (out of scope — needs the games)
 
-## M5 — Tray app
+## M5 — Spatial anchoring (pin a window in space)
+- [x] Mag correction enabled by default (was opt-in in M3)
+- [x] Gyro bias estimator (1024-sample sliding window, populated only on stationary samples)
+- [x] Stationary detector (|gyro|<0.04 rad/s & |a-G|<0.6 m/s² for 150ms)
+- [x] Position integrator (double-integrate accel in world frame + ZUPT)
+- [x] SpatialAnchor state machine (Booting -> Calibrating -> Running)
+- [x] SetAnchorHere() rebases world origin to current pose
+- [x] CLI hotkeys (Space=anchor, R=reset, S=status, Q=quit)
+- [x] FreePIE UDP emit extended to ship raw position + orientation (flags=0x03)
+- [x] 52/52 unit tests pass
+- [x] docs/M5-SPATIAL-ANCHORING.md with calibration recipe
+- [ ] Real-device verification (drift under walking motion, indoor mag rejection)
+
+## M6 — Tray app
 - [ ] `H.NotifyIcon` tray shell
 - [ ] Settings window: smoothing, axis remap, FOV curve, autostart
 - [ ] Single-instance via named Mutex
