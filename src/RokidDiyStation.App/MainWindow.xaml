@@ -17,10 +17,24 @@
 
         <!-- status -->
         <Border Grid.Row="0" Padding="10" Margin="0,0,0,12" CornerRadius="4" Background="#FF1F2937">
-            <StackPanel>
-                <TextBlock x:Name="StatusText" Foreground="White" FontSize="14" FontWeight="SemiBold" Text="Idle"/>
-                <TextBlock x:Name="DetailText" Foreground="#FFB0BEC5" FontSize="11" Margin="0,4,0,0"/>
-            </StackPanel>
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock x:Name="StatusText" Foreground="White" FontSize="14" FontWeight="SemiBold" Text="Idle"/>
+                    <TextBlock x:Name="DetailText" Foreground="#FFB0BEC5" FontSize="11" Margin="0,4,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
+                    <Button x:Name="SetAnchorBtn" Content="Set Anchor" Click="OnSetAnchorClick"
+                            Padding="10,4" Margin="0,0,6,0" Background="#FF006064" Foreground="White"
+                            BorderThickness="0" Cursor="Hand" ToolTip="Anchor here (Ctrl+Space)"/>
+                    <Button x:Name="ResetAnchorBtn" Content="Reset" Click="OnResetAnchorClick"
+                            Padding="10,4" Background="#FF37474F" Foreground="White"
+                            BorderThickness="0" Cursor="Hand" ToolTip="Reset anchor (Ctrl+R)"/>
+                </StackPanel>
+            </Grid>
         </Border>
 
         <!-- UDP settings -->
@@ -71,11 +85,11 @@
                     <RowDefinition/><RowDefinition/><RowDefinition/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Set anchor here" VerticalAlignment="Center"/>
-                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="AnchorKeyLabel" Text="Space" Foreground="#FF64B5F6"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="Ctrl+Space" Foreground="#FF64B5F6"/>
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="Reset anchor" VerticalAlignment="Center"/>
-                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="ResetKeyLabel" Text="R" Foreground="#FF64B5F6"/>
+                <TextBlock Grid.Row="1" Grid.Column="1" Text="Ctrl+R" Foreground="#FF64B5F6"/>
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Recenter view" VerticalAlignment="Center"/>
-                <TextBlock Grid.Row="2" Grid.Column="1" x:Name="RecenterKeyLabel" Text="C" Foreground="#FF64B5F6"/>
+                <TextBlock Grid.Row="2" Grid.Column="1" Text="Ctrl+C" Foreground="#FF64B5F6"/>
             </Grid>
         </GroupBox>
 

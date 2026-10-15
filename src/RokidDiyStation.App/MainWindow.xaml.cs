@@ -54,9 +54,6 @@ public partial class MainWindow : Window
         RawPosBox.IsChecked = true;
         AutostartBox.IsChecked = s.Autostart;
         StartMinBox.IsChecked  = s.StartMinimised;
-        AnchorKeyLabel.Text    = s.AnchorHotkey;
-        ResetKeyLabel.Text     = s.ResetHotkey;
-        RecenterKeyLabel.Text  = s.RecenterHotkey;
         AppendLog($"Settings loaded from {_settingsService.FilePath}");
     }
 
@@ -85,6 +82,19 @@ public partial class MainWindow : Window
     public void Recenter()
     {
         AppendLog("Recentred (placeholder — consumers re-derive the neutral orientation).");
+    }
+
+    private void OnSetAnchorClick(object sender, RoutedEventArgs e)
+    {
+        // The window has a _tracking reference; call it directly.
+        _tracking.SetAnchorHere();
+        AppendLog("Set anchor here.");
+    }
+
+    private void OnResetAnchorClick(object sender, RoutedEventArgs e)
+    {
+        _tracking.ResetAnchor();
+        AppendLog("Anchor reset.");
     }
 
     /// <summary>Tell the window that the next close is a real quit.
