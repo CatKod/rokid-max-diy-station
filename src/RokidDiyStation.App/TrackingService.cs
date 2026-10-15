@@ -44,6 +44,7 @@ public sealed class TrackingService : IDisposable
     private readonly OrientationSmoother _smoother;
 
     public event Action<TrackingStatus>? StatusChanged;
+    public event Action<string>? OnLog;
 
     public TrackingStatus Last => _last;
     public AppSettings Settings => _settings;
@@ -144,6 +145,13 @@ public sealed class TrackingService : IDisposable
         var lastTick = sw.Elapsed;
         var samplesThisSecond = 0;
         var lastUiTick = sw.Elapsed;
+        var lastDebugTick = sw.Elapsed;
+        // Accumulators for raw IMU magnitude so we can dump once a
+        // second.  Used to diagnose whether Euler noise is real
+        // head motion or filter instability.
+        double accGyroMag = 0, accAccelMag = 0, accMagMag = 0;
+        int accCount = 0;
+        var lastSampleForDebug = new ImuSample(0, Vector3.Zero, Vector3.Zero, Vector3.Zero, false, 0);
 
         try
         {
@@ -156,12 +164,30 @@ public sealed class TrackingService : IDisposable
                 if (!device.TryRead(timeoutMs: 100, out var report)) continue;
                 var result = PacketParser.Parse(report);
                 if (!result.IsOk) continue;
-                anchor.Update(result.Value);
+                var sample = result.Value;
+                // Accumulate raw magnitudes for the 1 s diagnostic.
+                accGyroMag  += sample.Gyro.Length();
+                accAccelMag += sample.Accel.Length();
+                accMagMag   += sample.Mag.Length();
+                accCount++;
+                lastSampleForDebug = sample;
+                anchor.Update(sample);
                 var (q, p) = _smoother.Update(anchor.HeadOrientation, anchor.HeadPosition);
                 emitter.Send(q, p);
                 samplesThisSecond++;
 
                 var now = sw.Elapsed;
+                if ((now - lastDebugTick).TotalSeconds >= 1.0)
+                {
+                    var avgGyro  = accCount > 0 ? accGyroMag  / accCount : 0;
+                    var avgAccel = accCount > 0 ? accAccelMag / accCount : 0;
+                    var avgMag   = accCount > 0 ? accMagMag   / accCount : 0;
+                    var (dr, dp, dy) = SyntheticImuSource.ToEulerZYX(q);
+                    AppendLogSafe($"DBG 1s: avg|gyro|={avgGyro:F3} rad/s  avg|accel|={avgAccel:F2} m/s²  avg|mag|={avgMag:F2} µT  eul=({dr*180/MathF.PI:F1}, {dp*180/MathF.PI:F1}, {dy*180/MathF.PI:F1})  cal={anchor.IsGyroCalibrated} stat={anchor.IsStationary}");
+                    accGyroMag = accAccelMag = accMagMag = 0; accCount = 0;
+                    lastDebugTick = now;
+                }
+
                 // UI tick every 200ms so the status panel feels live.
                 if ((now - lastUiTick).TotalMilliseconds >= 200)
                 {
@@ -201,6 +227,11 @@ public sealed class TrackingService : IDisposable
     {
         _last = s;
         try { StatusChanged?.Invoke(s); } catch { /* UI may be gone */ }
+    }
+
+    private void AppendLogSafe(string line)
+    {
+        try { OnLog?.Invoke(line); } catch { /* UI may be gone */ }
     }
 
     public void Dispose()

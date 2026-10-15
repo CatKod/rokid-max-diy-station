@@ -47,6 +47,7 @@ public sealed class TrayApplicationContext
         _tray.LeftClickCommand = new RelayCommand(_ => ToggleMainWindow());
 
         _tracking.StatusChanged += OnStatusChanged;
+        _tracking.OnLog += line => _mainWindow.AppendLog(line);
         _tracking.Start();
 
         // The actual window show is deferred to OnApplicationStarted
