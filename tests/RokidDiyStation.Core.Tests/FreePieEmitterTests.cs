@@ -161,4 +161,36 @@ public class FreePieEmitterTests
         Assert.InRange(MathF.Abs(pitchRad * 180f / MathF.PI), 0, 10f);
         Assert.InRange(MathF.Abs(rollRad * 180f / MathF.PI), 0, 10f);
     }
+
+    [Fact]
+    public void Emitter_Sends_Both_Position_And_Orientation_Over_UDP()
+    {
+        // M5.7 — when configured with Raw|Orient, a position passed to
+        // Send() must arrive on the receiver at the raw XYZ offsets.
+        using var receiver = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+        receiver.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+        var port = ((IPEndPoint)receiver.LocalEndPoint!).Port;
+        using var emitter = new FreePieEmitter(new FreePieEmitterOptions(
+            TargetHost: "127.0.0.1",
+            TargetPort: port,
+            Flags: FreePieFlags.Raw | FreePieFlags.Orient,
+            IncludeRawPosition: true));
+        // 30° yaw, position (0.1, 0, -0.2).
+        var q = SyntheticImuSource.FromEulerZYX(0f, 0f, 30f * MathF.PI / 180f);
+        var pos = new Vector3(0.1f, 0f, -0.2f);
+        Assert.True(emitter.Send(q, pos));
+        receiver.ReceiveTimeout = 1000;
+        var buf = new byte[64];
+        var n = receiver.Receive(buf);
+        Assert.Equal(50, n);
+        Assert.Equal((byte)(FreePieFlags.Raw | FreePieFlags.Orient), buf[1]);
+        var x = BitConverter.ToSingle(buf, 2);
+        var y = BitConverter.ToSingle(buf, 6);
+        var z = BitConverter.ToSingle(buf, 10);
+        Assert.InRange(MathF.Abs(x - 0.1f), 0, 1e-5f);
+        Assert.InRange(MathF.Abs(y - 0f),   0, 1e-5f);
+        Assert.InRange(MathF.Abs(z + 0.2f), 0, 1e-5f);
+        var yawRad = BitConverter.ToSingle(buf, 2 + 9 * 4);
+        Assert.InRange(MathF.Abs(yawRad * 180f / MathF.PI - 30f), 0, 1f);
+    }
 }
