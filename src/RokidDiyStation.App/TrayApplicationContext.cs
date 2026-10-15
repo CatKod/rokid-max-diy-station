@@ -107,6 +107,15 @@ public sealed class TrayApplicationContext
     private void OnStatusChanged(TrackingStatus s)
     {
         if (_tray is null) return;
+        // StatusChanged is raised from the background tracking thread.
+        // All WPF access (ToolTipText, the window's status panel,
+        // AppendLog) must be marshalled to the UI thread.
+        if (_mainWindow.Dispatcher.CheckAccess()) UpdateUi(s);
+        else _mainWindow.Dispatcher.BeginInvoke(new Action(() => UpdateUi(s)));
+    }
+
+    private void UpdateUi(TrackingStatus s)
+    {
         _tray.ToolTipText = s.State switch
         {
             TrackingState.Stopped   => "Rokid DiyStation — stopped",

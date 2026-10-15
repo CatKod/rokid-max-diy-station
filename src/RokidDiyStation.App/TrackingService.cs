@@ -162,24 +162,25 @@ public sealed class TrackingService : IDisposable
                 samplesThisSecond++;
 
                 var now = sw.Elapsed;
+                // UI tick every 200ms so the status panel feels live.
+                if ((now - lastUiTick).TotalMilliseconds >= 200)
+                {
+                    lastUiTick = now;
+                    var sps = (int)(samplesThisSecond / (now - lastTick).TotalSeconds);
+                    var (r, pi, ya) = SyntheticImuSource.ToEulerZYX(q);
+                    Publish(new TrackingStatus(
+                        TrackingState.Streaming,
+                        $"Streaming {device.ProductName}",
+                        sps,
+                        anchor.IsGyroCalibrated,
+                        anchor.IsStationary,
+                        p,
+                        (r * 180 / Math.PI, pi * 180 / Math.PI, ya * 180 / Math.PI)));
+                }
                 if ((now - lastTick).TotalSeconds >= 1.0)
                 {
-                    var sps = samplesThisSecond;
                     samplesThisSecond = 0;
                     lastTick = now;
-                    if ((now - lastUiTick).TotalMilliseconds >= 200)
-                    {
-                        lastUiTick = now;
-                        var (r, pi, ya) = SyntheticImuSource.ToEulerZYX(q);
-                        Publish(new TrackingStatus(
-                            TrackingState.Streaming,
-                            $"Streaming {device.ProductName}",
-                            sps,
-                            anchor.IsGyroCalibrated,
-                            anchor.IsStationary,
-                            p,
-                            (r * 180 / Math.PI, pi * 180 / Math.PI, ya * 180 / Math.PI)));
-                    }
                 }
             }
         }
