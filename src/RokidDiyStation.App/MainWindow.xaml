@@ -31,8 +31,11 @@
                             Padding="10,4" Margin="0,0,6,0" Background="#FF006064" Foreground="White"
                             BorderThickness="0" Cursor="Hand" ToolTip="Anchor here (Ctrl+Space)"/>
                     <Button x:Name="ResetAnchorBtn" Content="Reset" Click="OnResetAnchorClick"
-                            Padding="10,4" Background="#FF37474F" Foreground="White"
+                            Padding="10,4" Margin="0,0,6,0" Background="#FF37474F" Foreground="White"
                             BorderThickness="0" Cursor="Hand" ToolTip="Reset anchor (Ctrl+R)"/>
+                    <Button x:Name="RecenterBtn" Content="Recenter" Click="OnRecenterClick"
+                            Padding="10,4" Background="#FF455A64" Foreground="White"
+                            BorderThickness="0" Cursor="Hand" ToolTip="Recenter view (Ctrl+C)"/>
                 </StackPanel>
             </Grid>
         </Border>
@@ -82,7 +85,7 @@
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
-                    <RowDefinition/><RowDefinition/><RowDefinition/>
+                    <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Set anchor here" VerticalAlignment="Center"/>
                 <TextBlock Grid.Row="0" Grid.Column="1" Text="Ctrl+Space" Foreground="#FF64B5F6"/>
@@ -90,6 +93,8 @@
                 <TextBlock Grid.Row="1" Grid.Column="1" Text="Ctrl+R" Foreground="#FF64B5F6"/>
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Recenter view" VerticalAlignment="Center"/>
                 <TextBlock Grid.Row="2" Grid.Column="1" Text="Ctrl+C" Foreground="#FF64B5F6"/>
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Show/hide this window" VerticalAlignment="Center" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="3" Grid.Column="1" Text="Ctrl+Alt+R" Foreground="#FF64B5F6" Margin="0,4,0,0"/>
             </Grid>
         </GroupBox>
 

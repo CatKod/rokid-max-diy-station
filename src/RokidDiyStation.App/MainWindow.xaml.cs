@@ -97,6 +97,11 @@ public partial class MainWindow : Window
         AppendLog("Anchor reset.");
     }
 
+    private void OnRecenterClick(object sender, RoutedEventArgs e)
+    {
+        Recenter();
+    }
+
     /// <summary>Tell the window that the next close is a real quit.
     /// Called by <see cref="TrayApplicationContext.Quit"/>.</summary>
     public void MarkQuitting() => _firstClose = false;

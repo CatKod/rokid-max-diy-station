@@ -17,9 +17,11 @@ public sealed class TrayApplicationContext
     private readonly AutostartService _autostart = new();
     private readonly TaskbarIcon _tray;
     private readonly MainWindow _mainWindow;
+    private readonly NotifyIconHost _host;
     private HotkeyBinding? _spaceHotkey;
     private HotkeyBinding? _rHotkey;
     private HotkeyBinding? _cHotkey;
+    private HotkeyBinding? _showHotkey;
     private bool _quitting;
 
     public TrayApplicationContext(SettingsService settingsService, TrackingService tracking)
@@ -27,6 +29,9 @@ public sealed class TrayApplicationContext
         _settingsService = settingsService;
         _tracking = tracking;
         _mainWindow = new MainWindow(_settingsService, _autostart, _tracking);
+        // The host window is the WPF visual-tree parent for the TaskbarIcon.
+        // It is created and never shown to the user (see NotifyIconHost).
+        _host = new NotifyIconHost();
 
         _tray = new TaskbarIcon
         {
@@ -36,7 +41,10 @@ public sealed class TrayApplicationContext
             NoLeftClickDelay = true,
             ContextMenu = BuildContextMenu(),
         };
-        _tray.LeftClickCommand = new RelayCommand(_ => ShowMainWindow());
+        // Attach the TaskbarIcon to the host so it lives in the WPF visual
+        // tree — without this the icon never registers with the Shell tray.
+        _host.Content = _tray;
+        _tray.LeftClickCommand = new RelayCommand(_ => ToggleMainWindow());
 
         _tracking.StatusChanged += OnStatusChanged;
         _tracking.Start();
@@ -48,10 +56,11 @@ public sealed class TrayApplicationContext
     private System.Windows.Controls.ContextMenu BuildContextMenu()
     {
         var menu = new System.Windows.Controls.ContextMenu();
-        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Open settings…", Command = new RelayCommand(_ => ShowMainWindow()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Show settings (Ctrl+Alt+R)", Command = new RelayCommand(_ => ShowMainWindow()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Set anchor here (Ctrl+Space)", Command = new RelayCommand(_ => _tracking.SetAnchorHere()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Reset anchor (Ctrl+R)",       Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Recenter view (Ctrl+C)",      Command = new RelayCommand(_ => _mainWindow.Recenter()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Quit", Command = new RelayCommand(_ => Quit()) });
         return menu;
@@ -106,10 +115,9 @@ public sealed class TrayApplicationContext
             TrackingState.Error     => $"Rokid DiyStation — error: {s.Message}",
             _                       => "Rokid DiyStation",
         };
-        if (_mainWindow.IsVisible)
-        {
-            _mainWindow.UpdateStatus(s);
-        }
+        // Always update the window so the user sees live data even
+        // when the window is hidden behind other apps.
+        _mainWindow.UpdateStatus(s);
     }
 
     public void ShowMainWindow()
@@ -121,6 +129,12 @@ public sealed class TrayApplicationContext
         _mainWindow.Topmost = true;
         _mainWindow.Topmost = false;
         _mainWindow.Focus();
+    }
+
+    public void ToggleMainWindow()
+    {
+        if (_mainWindow.IsVisible) _mainWindow.Hide();
+        else ShowMainWindow();
     }
 
     private void RegisterHotkeys()
@@ -145,6 +159,14 @@ public sealed class TrayApplicationContext
             _cHotkey.Pressed += () => _mainWindow.Recenter();
         else
             _mainWindow.AppendLog("Hotkey Ctrl+C (recenter) unavailable.");
+
+        // Show/hide window hotkey — Ctrl+Alt+R is a deliberately
+        // awkward combo so we don't clash with common shortcuts.
+        _showHotkey = TryHotkey(4, NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x52 /* VK_R */);
+        if (_showHotkey is not null)
+            _showHotkey.Pressed += () => ToggleMainWindow();
+        else
+            _mainWindow.AppendLog("Hotkey Ctrl+Alt+R (show/hide window) unavailable.");
     }
 
     private HotkeyBinding? TryHotkey(int id, uint modifiers, uint vk)
@@ -203,11 +225,13 @@ public sealed class TrayApplicationContext
         try { _spaceHotkey?.Dispose(); } catch { }
         try { _rHotkey?.Dispose(); } catch { }
         try { _cHotkey?.Dispose(); } catch { }
+        try { _showHotkey?.Dispose(); } catch { }
         try { _settingsService.Save(); } catch { }
         _tray.Visibility = Visibility.Collapsed;
         // Mark the window so its OnClosing handler won't intercept.
         _mainWindow.MarkQuitting();
         _mainWindow.Close();
+        try { _host.Close(); } catch { }
         Application.Current.Shutdown();
     }
 }
