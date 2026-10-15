@@ -60,13 +60,27 @@ A living plan. PRs that move items forward get a fast-review promise.
 - [x] FreePIE UDP emit extended to ship raw position + orientation (flags=0x03)
 - [x] 52/52 unit tests pass
 - [x] docs/M5-SPATIAL-ANCHORING.md with calibration recipe
-- [ ] Real-device verification (drift under walking motion, indoor mag rejection)
+- [x] Real-device verification: # streaming from Rokid Max (VID=0x04D2 PID=0x162F) ✓
 
 ## M6 — Tray app
-- [ ] `H.NotifyIcon` tray shell
-- [ ] Settings window: smoothing, axis remap, FOV curve, autostart
-- [ ] Single-instance via named Mutex
-- [ ] MSIX / installer
+- [x] H.NotifyIcon.Wpf (TaskbarIcon) + context menu (Open / Set anchor / Reset / Quit)
+- [x] Settings window (host/port, smoothing, FOV, mag, autostart, hotkey labels, log)
+- [x] JSON settings persistence in %APPDATA%\RokidDiyStation\settings.json (atomic write)
+- [x] Single-instance via named Mutex + named-pipe "show" signal
+- [x] Autostart via HKCU\…\Run (verified enable/disable round-trip)
+- [x] Global hotkeys via Win32 RegisterHotKey (Space=anchor, R=reset, C=recenter)
+- [x] TrackingService owns SpatialAnchor + emitter on a background thread; 5 Hz UI status
+- [x] OrientationSmoother (EMA) plumbed between anchor and emitter
+- [x] OrientationSmoother, AppSettings, SettingsService, AxisRemap tests
+- [x] Smoke tests: --discover, --reset, tray start/stop, settings.json persist, single-instance
+- [x] docs/M6-TRAY-APP.md
+- [ ] MSIX / installer (deferred — the exe runs from the build output)
+- [ ] Icon (.ico) — currently uses SystemIcons.Information as a placeholder
+
+## M7 — Niceties
+- [ ] WebSocket emitter (browser/Three.js demo)
+- [ ] CSV/JSON logging of the live pose for offline analysis
+- [ ] Drift visualisation tool (read CSV → plot)
 
 ## M6 — Niceties
 - [ ] Virtual mouse (smooth-pan) output

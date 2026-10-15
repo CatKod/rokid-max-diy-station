@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 //
-// Entry point for the Windows tray app.
+// Composition root for the Windows tray app.
 //
-// The M0/M1/M2 milestones do not yet ship the actual UI — that lands with M5.
-// For now this exists to satisfy the `<OutputType>WinExe</OutputType>` build
-// requirement and to give an early place to verify that the Core HID layer
-// can be loaded end-to-end on a real device.
-
+//   * WPF Application owns the message pump
+//   * SingleInstance mutex prevents a second copy
+//   * SettingsService loads / persists JSON under %APPDATA%
+//   * TrackingService runs the HID + UDP pipeline on a background thread
+//   * TrayApplicationContext owns the H.NotifyIcon TaskbarIcon and the
+//     global hotkeys (Space / R / C)
+using System.Windows;
 using RokidDiyStation.Core.HidCapture;
+using System.IO;
 
 namespace RokidDiyStation.App;
 
@@ -16,9 +19,7 @@ internal static class Program
     [STAThread]
     public static int Main(string[] args)
     {
-        // Until M5 wires up H.NotifyIcon + the settings window, this is a
-        // command-line-friendly launcher that delegates to the Core enumerator
-        // so it stays useful for smoke tests.
+        // Helper: --discover / --reset / --minimised for shell wrappers
         if (args.Length > 0 && args[0] == "--discover")
         {
             foreach (var d in HidEnumerator.Discover())
@@ -27,9 +28,43 @@ internal static class Program
             }
             return 0;
         }
+        if (args.Length > 0 && args[0] == "--reset")
+        {
+            var path = SettingsService.DefaultPath();
+            if (File.Exists(path)) File.Delete(path);
+            Console.WriteLine($"Removed {path}");
+            return 0;
+        }
 
-        Console.WriteLine("Rokid DiyStation — M5 tray UI is not yet wired up. Use `rokid-station-cli` for now.");
-        Console.WriteLine("Tip: pass --discover to list attached Rokid devices.");
+        var single = new SingleInstance();
+        if (!single.IsOwner)
+        {
+            // Another copy is running; ask it to show its window and exit.
+            SingleInstance.SignalShow();
+            single.Dispose();
+            return 0;
+        }
+
+        var settingsService = new SettingsService();
+        settingsService.Load();
+        var settings = settingsService.Current;
+        if (args.Contains("--minimised"))
+        {
+            settings = settings with { StartMinimised = true };
+            settingsService.Update(settings);
+        }
+
+        var app = new Application
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown,
+        };
+        var tracking = new TrackingService(settings, settingsService);
+        var tray = new TrayApplicationContext(settingsService, tracking);
+        single.OnShowRequested += _ => tray.OnExternalShowRequested(0);
+        app.Exit += (_, _) => tray.Quit();
+
+        // Run the message loop.  Quit() will call Application.Current.Shutdown().
+        app.Run();
         return 0;
     }
 }

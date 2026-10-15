@@ -9,6 +9,7 @@
     <RootNamespace>RokidDiyStation.App</RootNamespace>
     <AssemblyName>RokidDiyStation</AssemblyName>
     <StartupObject>RokidDiyStation.App.Program</StartupObject>
+    <ApplicationIcon />
   </PropertyGroup>
 
   <ItemGroup>
