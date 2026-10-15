@@ -45,7 +45,7 @@ public enum FusionResult
 /// <param name="KpMag">Proportional gain for magnetometer correction.</param>
 /// <param name="KiMag">Integral gain for magnetometer correction.</param>
 public readonly record struct MahonyTuning(
-    float KpAccel = 2.0f,
+    float KpAccel = 0.5f,
     float KiAccel = 0.01f,
     float KpMag = 1.0f,
     float KiMag = 0.005f)

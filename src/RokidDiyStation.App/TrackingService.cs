@@ -153,12 +153,16 @@ public sealed class TrackingService : IDisposable
         var samplesThisSecond = 0;
         var lastUiTick = sw.Elapsed;
         var lastDebugTick = sw.Elapsed;
-        // Accumulators for raw IMU magnitude so we can dump once a
-        // second.  Used to diagnose whether Euler noise is real
-        // head motion or filter instability.
+        // Accumulators for raw IMU magnitude AND per-axis sums so we
+        // can dump once a second.  Used to diagnose whether Euler
+        // noise is real head motion, sensor bias on a particular
+        // axis, or filter instability.
         double accGyroMag = 0, accAccelMag = 0, accMagMag = 0;
+        Vector3 accGyroSum = Vector3.Zero, accAccelSum = Vector3.Zero, accMagSum = Vector3.Zero;
         int accCount = 0;
         var lastSampleForDebug = new ImuSample(0, Vector3.Zero, Vector3.Zero, Vector3.Zero, false, 0);
+        var wasCalibrated = false;
+        var autoAnchored = false;
 
         try
         {
@@ -172,16 +176,34 @@ public sealed class TrackingService : IDisposable
                 var result = PacketParser.Parse(report);
                 if (!result.IsOk) continue;
                 var sample = result.Value;
-                // Accumulate raw magnitudes for the 1 s diagnostic.
+                // Accumulate raw magnitudes AND per-axis sums for the
+                // 1 s diagnostic.  Per-axis data is critical to
+                // distinguish a true motion from a single-axis bias.
                 accGyroMag  += sample.Gyro.Length();
                 accAccelMag += sample.Accel.Length();
                 accMagMag   += sample.Mag.Length();
+                accGyroSum  += sample.Gyro;
+                accAccelSum += sample.Accel;
+                accMagSum   += sample.Mag;
                 accCount++;
                 lastSampleForDebug = sample;
                 anchor.Update(sample);
                 var (q, p) = _smoother.Update(anchor.HeadOrientation, anchor.HeadPosition);
                 emitter.Send(q, p);
                 samplesThisSecond++;
+                // Detect the Calibrating -> Running transition so we
+                // can auto-anchor once.  Auto-anchoring at this moment
+                // (when the filter has just declared itself stable)
+                // means "wherever the user is wearing the glasses and
+                // looking forward" becomes the world origin — exactly
+                // what they want for spatial-anchor-driven games and
+                // recentring.
+                if (!autoAnchored && anchor.IsGyroCalibrated)
+                {
+                    autoAnchored = true;
+                    anchor.SetAnchorHere();
+                    AppendLogSafe("Calibration complete — auto-anchored at current pose. Use 'Set Anchor' to re-anchor.");
+                }
 
                 var now = sw.Elapsed;
                 if ((now - lastDebugTick).TotalSeconds >= 1.0)
@@ -189,9 +211,30 @@ public sealed class TrackingService : IDisposable
                     var avgGyro  = accCount > 0 ? accGyroMag  / accCount : 0;
                     var avgAccel = accCount > 0 ? accAccelMag / accCount : 0;
                     var avgMag   = accCount > 0 ? accMagMag   / accCount : 0;
+                    var avgG = accCount > 0 ? accGyroSum  / accCount : Vector3.Zero;
+                    var avgA = accCount > 0 ? accAccelSum / accCount : Vector3.Zero;
+                    var avgM = accCount > 0 ? accMagSum   / accCount : Vector3.Zero;
                     var (dr, dp, dy) = SyntheticImuSource.ToEulerZYX(q);
-                    AppendLogSafe($"DBG 1s: avg|gyro|={avgGyro:F3} rad/s  avg|accel|={avgAccel:F2} m/s²  avg|mag|={avgMag:F2} µT  eul=({dr*180/MathF.PI:F1}, {dp*180/MathF.PI:F1}, {dy*180/MathF.PI:F1})  cal={anchor.IsGyroCalibrated} stat={anchor.IsStationary}");
-                    accGyroMag = accAccelMag = accMagMag = 0; accCount = 0;
+                    AppendLogSafe(
+                        $"DBG 1s: " +
+                        $"gyro=({avgG.X:F4},{avgG.Y:F4},{avgG.Z:F4})|g|={avgGyro:F3} rad/s  " +
+                        $"acc=({avgA.X:F2},{avgA.Y:F2},{avgA.Z:F2})|a|={avgAccel:F2} m/s²  " +
+                        $"mag=({avgM.X:F1},{avgM.Y:F1},{avgM.Z:F1})  " +
+                        $"eul=({dr*180/MathF.PI:F1}, {dp*180/MathF.PI:F1}, {dy*180/MathF.PI:F1})  " +
+                        $"cal={anchor.IsGyroCalibrated} stat={anchor.IsStationary}");
+                    // If |pitch| is near ±90° we're in the gimbal-lock
+                    // neighbourhood and the Euler decomposition is
+                    // numerically unstable (small noise => huge
+                    // angle jumps).  Surface that as a warning so the
+                    // user knows to set an anchor at a more
+                    // head-natural pitch (around 0..30°).
+                    if (MathF.Abs(dp) > 1.396f /* 80° */)
+                    {
+                        AppendLogSafe($"WARN: pitch={dp * 180 / MathF.PI:F1}° near gimbal lock — set anchor or use quaternion output.");
+                    }
+                    accGyroMag = accAccelMag = accMagMag = 0;
+                    accGyroSum = accAccelSum = accMagSum = Vector3.Zero;
+                    accCount = 0;
                     lastDebugTick = now;
                 }
 

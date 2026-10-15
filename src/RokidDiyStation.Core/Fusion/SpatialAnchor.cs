@@ -77,6 +77,8 @@ public sealed class SpatialAnchor
         _position.Reset();
         _state = AnchorState.Booting;
         _samplesSinceReset = 0;
+        _autoAnchored = false;
+        _anchorInv = (Quaternion.Identity, Vector3.Zero);
         HeadOrientation = Quaternion.Identity;
         HeadPosition = Vector3.Zero;
     }
@@ -91,7 +93,16 @@ public sealed class SpatialAnchor
     {
         // Capture the current head pose in the fusion's world frame so
         // we can transform future poses into the new anchor frame.
-        _anchorInv = (Quaternion.Inverse(_fusion.Orientation), _position.Position);
+        // Quaternion.Inverse divides by |q|², which amplifies the
+        // drift in a non-unit quaternion — so renormalise first.
+        var q = _fusion.Orientation;
+        var n2 = q.X * q.X + q.Y * q.Y + q.Z * q.Z + q.W * q.W;
+        if (n2 > 0f && MathF.Abs(n2 - 1f) > 1e-3f)
+        {
+            var inv = 1f / MathF.Sqrt(n2);
+            q = new Quaternion(q.X * inv, q.Y * inv, q.Z * inv, q.W * inv);
+        }
+        _anchorInv = (Quaternion.Inverse(q), _position.Position);
         _stationary.Reset();
         // Publish the rebased pose immediately so callers see the
         // anchor origin without having to push another sample.
@@ -157,6 +168,8 @@ public sealed class SpatialAnchor
         _samplesSinceReset++;
         return _state;
     }
+
+    private bool _autoAnchored;
 
     public const int MinSamplesForStableEstimate = MahonyFusion.MinSamplesForStableEstimate;
 }
