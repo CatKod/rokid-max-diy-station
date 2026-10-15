@@ -20,4 +20,10 @@
     <ProjectReference Include="..\..\src\RokidDiyStation.Core\RokidDiyStation.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\..\docs\fixtures\*.bin" Link="fixtures\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>
