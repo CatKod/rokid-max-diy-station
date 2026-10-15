@@ -8,7 +8,7 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>RokidDiyStation.App</RootNamespace>
     <AssemblyName>RokidDiyStation</AssemblyName>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <StartupObject>RokidDiyStation.App.Program</StartupObject>
   </PropertyGroup>
 
   <ItemGroup>

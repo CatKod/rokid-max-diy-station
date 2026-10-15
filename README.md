@@ -69,8 +69,10 @@ rokid-max-diy-station/
 
 ## 🚧 Status
 
-> **Bootstrapping.** Repo just created — greenfield, no code yet.
-> Tracking happens in Issues and Projects.
+> **M1 + M2 landed.** Vendor / product IDs, report ID, and the 64-byte IMU
+> payload are now decoded by `RokidDiyStation.Core.Protocol.PacketParser`,
+> exercised by xUnit tests, and surfaced through `rokid-station-cli discover`,
+> `stream`, and `parse <hex>`. See `ROADMAP.md` for what is left.
 
 ## 🤝 Contributing
 

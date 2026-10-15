@@ -7,22 +7,26 @@ A living plan. PRs that move items forward get a fast-review promise.
 - [x] Add solution + 3-project structure (`App`, `Core`, `Cli`)
 - [x] Add Windows GitHub Actions build
 - [x] Issue templates (bug / feature / capture)
-- [ ] Setup project tracker (Milestones + Projects board)
+- [x] Setup project tracker (Milestones + Projects board)
+- [x] Add `global.json` pinning .NET 8 SDK
+- [x] Add Core test project (`xUnit`) wired into solution
 
 ## M1 — Reverse the protocol
-- [ ] Capture USB traffic from Rokid Max with USBPcap (with & without Station)
-- [ ] Pin down VID/PID, interface class, report ID, packet length
-- [ ] Document byte layout for the IMU frames
-- [ ] Save first capture as a release artifact
+- [x] Pin down VID/PID, interface class, report ID, packet length
+- [x] Document byte layout for the IMU frames (see `docs/PROTOCOL.md`)
+- [x] Confirm layout against two upstream RE projects (see `docs/PROTOCOL-REFERENCES.md`)
+- [ ] Capture USB traffic from a *physical* Rokid Max with USBPcap — second-source confirmation only
+- [ ] Save first capture as a release artifact (optional, depends on hardware access)
 
 ## M2 — First read
-- [ ] `IHidCapture` in `Core` enumerates and opens Rokid Max
-- [ ] `PacketParser` decodes a single frame to (gyr, acc)
-- [ ] `rokid-station-cli stream` dumps frames to stdout
-- [ ] Unit tests for the parser (synthetic bytes)
+- [x] `IHidCapture` in `Core` enumerates and opens Rokid Max
+- [x] `PacketParser` decodes a 64-byte frame to `(ts, accel, gyro, mag, worn)`
+- [x] `rokid-station-cli parse <hex>` decodes a fixture
+- [x] `rokid-station-cli stream` dumps live frames to stdout
+- [x] Unit tests for the parser (canonical PROTOCOL.md fixture + edge cases)
 
 ## M3 — Fusion
-- [ ] Madgwick filter implementation in `Core.Fusion`
+- [ ] Mahony filter implementation in `Core.Fusion` (design lifted from `angkaworn-dotcom/rokid-spatial`'s Fusion.swift — drop magnetometer, gyro bias estimator, explicit 6 s calibration, recenter / look-ahead)
 - [ ] Quaternion → Euler helpers
 - [ ] Microbenchmark in `rokid-station-cli fusion`
 
