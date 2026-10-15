@@ -10,6 +10,7 @@
 
   <ItemGroup>
     <PackageReference Include="HidLibrary" Version="3.2.20" />
+    <PackageReference Include="HidSharp" Version="2.6.4" />
     <PackageReference Include="System.IO.Ports" Version="8.0.0" />
   </ItemGroup>
 

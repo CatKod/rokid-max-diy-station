@@ -26,10 +26,13 @@ internal static class Program
         {
             return args[0] switch
             {
-                "discover" => Discover(),
-                "stream"   => Stream(args.AsSpan(1)),
-                "parse"    => Parse(args.AsSpan(1)),
-                "diagnose" => Diagnose(),
+                "discover"        => Discover(),
+                "discover-sharp"  => DiscoverSharp(),
+                "stream"          => Stream(args.AsSpan(1)),
+                "stream-sharp"    => StreamSharp(args.AsSpan(1)),
+                "parse"           => Parse(args.AsSpan(1)),
+                "diagnose"        => Diagnose(),
+                "diagnose-sharp"  => DiagnoseSharp(),
                 "-h" or "--help" or "help" => PrintUsage(),
                 _ => UnknownCommand(args[0]),
             };
@@ -190,6 +193,100 @@ internal static class Program
         Console.WriteLine("  rokid-station-cli diagnose");
         Console.WriteLine("  rokid-station-cli stream [--timeout SECONDS] [--count N]");
         Console.WriteLine("  rokid-station-cli parse <hex-bytes>");
+        Console.WriteLine();
+        Console.WriteLine("Experimental HidSharp backend (workaround for OpenDevice=false):");
+        Console.WriteLine("  rokid-station-cli discover-sharp");
+        Console.WriteLine("  rokid-station-cli diagnose-sharp");
+        Console.WriteLine("  rokid-station-cli stream-sharp [--timeout SECONDS] [--count N]");
+        return 0;
+    }
+
+    // ---------- HidSharp experimental backend ----------
+
+    private static int DiscoverSharp()
+    {
+        var devices = HidSharpEnumerator.Discover();
+        if (devices.Count == 0)
+        {
+            Console.WriteLine("[hidsharp] no Rokid devices found. Plug in the Rokid Max and retry.");
+            return 2;
+        }
+        Console.WriteLine($"[hidsharp] {devices.Count} Rokid device(s) found:");
+        foreach (var d in devices)
+        {
+            Console.WriteLine($"  {d.ProductName,-18} VID=0x{d.VendorId:X4}  PID=0x{d.ProductId:X4}  serial={d.SerialNumber}");
+        }
+        return 0;
+    }
+
+    private static int DiagnoseSharp()
+    {
+        var all = HidSharpEnumerator.DiscoverAllInterfaces();
+        Console.WriteLine($"[hidsharp] {all.Count} Rokid HID interface(s) detected:");
+        foreach (var d in all)
+        {
+            var tail = d.DevicePath.Length > 80 ? d.DevicePath[^80..] : d.DevicePath;
+            Console.WriteLine($"  PID=0x{d.ProductId:X4}  {d.ProductName,-20}  ...{tail}");
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("[hidsharp] attempting to open each one…");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var hit = 0;
+        foreach (var info in all)
+        {
+            if (cts.IsCancellationRequested) break;
+            try
+            {
+                using var capture = HidSharpEnumerator.Open(info);
+                Console.WriteLine($"  OK    {capture.ProductName,-20}  handle opened");
+                hit++;
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  FAIL  {info.ProductName,-20}  {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        if (hit == 0)
+        {
+            Console.WriteLine("[hidsharp] no interface opened. See docs/diag-hid-open-failure.md.");
+            return 2;
+        }
+        return 0;
+    }
+
+    private static int StreamSharp(ReadOnlySpan<string> args)
+    {
+        var timeoutSec = ParseIntFlag(args, "timeout", fallback: 0);
+        var count      = ParseIntFlag(args, "count", fallback: 0);
+
+        using var cts = timeoutSec > 0 ? new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec)) : null;
+
+        using var device = HidSharpEnumerator.OpenFirst();
+        var packetCount = 0;
+
+        Console.WriteLine($"[hidsharp] streaming from {device.ProductName} (VID=0x{device.VendorId:X4} PID=0x{device.ProductId:X4})");
+        Console.WriteLine("# ts_ns\taccel_x\taccel_y\taccel_z\tgyro_x\tgyro_y\tgyro_z\tmag_x\tmag_y\tmag_z\tworn");
+
+        while (true)
+        {
+            if (cts?.IsCancellationRequested == true) break;
+            if (count > 0 && packetCount >= count) break;
+
+            if (!device.TryRead(timeoutMs: 100, out var report)) continue;
+
+            var result = PacketParser.Parse(report);
+            if (!result.IsOk) continue;
+
+            var s = result.Value;
+            Console.WriteLine(
+                $"{s.TimestampNs}\t{s.Accel.X:F4}\t{s.Accel.Y:F4}\t{s.Accel.Z:F4}\t{s.Gyro.X:F5}\t{s.Gyro.Y:F5}\t{s.Gyro.Z:F5}\t{s.Mag.X:F2}\t{s.Mag.Y:F2}\t{s.Mag.Z:F2}\t{(s.Worn ? 1 : 0)}");
+            packetCount++;
+        }
+
+        Console.WriteLine($"# {packetCount} packets");
         return 0;
     }
 
