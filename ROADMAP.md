@@ -40,9 +40,14 @@ A living plan. PRs that move items forward get a fast-review promise.
 - [ ] Microbenchmark in `rokid-station-cli fusion` (skipped — low priority)
 
 ## M4 — FreeTrack emit
-- [ ] UDP client sending FreeTrack 2.x frames on port 5555
-- [ ] OpenTrack receives orientation
-- [ ] Verify in Star Citizen / DCS World / IL-2
+- [x] UDP client sending FreePIE-compatible 50-byte packets on port 5555
+  - `Core.Output.FreePieEmitter` (non-blocking socket, packet-reuse buffer)
+  - `Core.Output.FreePiePacket` (50-byte struct builder, end-to-end tested)
+  - CLI: `rokid-station-cli fusion-emit [--replay FILE] [--host H] [--port N]`
+  - End-to-end test on `docs/fixtures/raw-200.bin`: 200/200 packets received
+- [ ] OpenTrack receives orientation (verified by docs/M4-FREETRACK-EMIT.md
+      recipe; not yet tested with a live game)
+- [ ] Verify in Star Citizen / DCS World / IL-2 (out of scope — needs the games)
 
 ## M5 — Tray app
 - [ ] `H.NotifyIcon` tray shell

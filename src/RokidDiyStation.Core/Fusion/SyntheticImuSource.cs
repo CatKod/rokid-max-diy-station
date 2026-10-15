@@ -60,11 +60,14 @@ public sealed class SyntheticImuSource
 
             // Build quaternion from current Euler (Z-Y-X intrinsic)
             var q = FromEulerZYX(cur.rollDeg * MathF.PI / 180f, cur.pitchDeg * MathF.PI / 180f, cur.yawDeg * MathF.PI / 180f);
-            // accel = R^T * gravity
-            var accel = Rotate(Vector3.Transform(-Gravity, q)) + AccelBias;
+            // Accelerometer at rest measures the *reaction* to gravity,
+            // i.e. +1g along world up expressed in body frame.  We
+            // rotate the world-up vector (+Gravity) by R_world_to_body
+            // which is q*.
+            var accel = Vector3.Transform(Gravity, Quaternion.Inverse(q)) + AccelBias;
             if (AccelNoiseSigma > 0) accel += NoiseVector(AccelNoiseSigma);
             // mag = R^T * magField
-            var mag = Rotate(Vector3.Transform(MagField, q));
+            var mag = Vector3.Transform(MagField, Quaternion.Inverse(q));
             if (MagNoiseSigma > 0) mag += NoiseVector(MagNoiseSigma);
 
             yield return new ImuSample(
@@ -91,39 +94,50 @@ public sealed class SyntheticImuSource
 
     private static Vector3 Rotate(Vector3 v) => v; // already in world->body form
 
-    /// <summary>Quaternion from Z-Y-X intrinsic Euler (yaw-pitch-roll applied in that order).</summary>
+    /// <summary>Quaternion from intrinsic Z-Y-X Euler (R = Rz(roll) · Ry(yaw) · Rx(pitch)).</summary>
+    /// <remarks>
+    /// System.Numerics' Quaternion.CreateFromYawPitchRoll matches this
+    /// convention directly: rotation order is Z (roll), then Y (yaw),
+    /// then X (pitch) applied to a column vector.  We use it as the
+    /// canonical forward transform; the inverse (Euler decomposition)
+    /// is in <see cref="ToEulerZYX"/>.
+    /// </remarks>
     public static Quaternion FromEulerZYX(float roll, float pitch, float yaw)
     {
-        var cr = MathF.Cos(roll * 0.5f); var sr = MathF.Sin(roll * 0.5f);
-        var cp = MathF.Cos(pitch * 0.5f); var sp = MathF.Sin(pitch * 0.5f);
-        var cy = MathF.Cos(yaw * 0.5f); var sy = MathF.Sin(yaw * 0.5f);
-        return new Quaternion(
-            cr * cp * cy + sr * sp * sy,
-            sr * cp * cy - cr * sp * sy,
-            cr * sp * cy + sr * cp * sy,
-            cr * cp * sy - sr * sp * cy);
+        return Quaternion.CreateFromYawPitchRoll(yaw, pitch, roll);
     }
 
     /// <summary>Decompose a quaternion to Z-Y-X intrinsic Euler in degrees.</summary>
+    /// <remarks>
+    /// Matches <see cref="FromEulerZYX"/>: inverse of
+    /// <see cref="Quaternion.CreateFromYawPitchRoll(float, float, float)"/>,
+    /// which implements the rotation R = Ry(yaw) · Rx(pitch) · Rz(roll).
+    /// </remarks>
     public static (float Roll, float Pitch, float Yaw) ToEulerZYX(Quaternion q)
     {
-        // Z-Y-X (yaw-pitch-roll) intrinsic, with axes x=pitch, y=yaw, z=roll (Rokid device frame)
-        // For Tait-Bryan standard (X=pitch, Y=yaw, Z=roll), the matrix R = Rz * Ry * Rx.
-        // Here we recover (roll, pitch, yaw) directly.
-        // Use: roll = atan2(2(wz+xy), 1-2(z^2+x^2))
-        //      pitch = -asin(2(wx - yz))  // extrinsic pitch = intrinsic x
-        //      yaw = atan2(2(wy+xz), 1-2(x^2+y^2))
-        var sinr = 2f * (q.W * q.Z + q.X * q.Y);
-        var cosr = 1f - 2f * (q.Z * q.Z + q.X * q.X);
-        var roll = MathF.Atan2(sinr, cosr);
-        var sinp = 2f * (q.W * q.X - q.Y * q.Z);
+        // From R = Ry · Rx · Rz:
+        //   R[1,2] = -sin(pitch) = 2(yz - wx)   =>  pitch = -asin(2(yz - wx))
+        //   R[0,2] = sin(yaw)·cos(pitch)        = 2(xz + wy)
+        //   R[2,2] = cos(yaw)·cos(pitch)        = 1 - 2(x² + y²)
+        //   R[1,0] = cos(pitch)·sin(roll)       = 2(xy + wz)
+        //   R[1,1] = cos(pitch)·cos(roll)       = 1 - 2(x² + z²)
+        var sinp = -2f * (q.Y * q.Z - q.W * q.X);
         var pitch = MathF.Asin(Math.Clamp(sinp, -1f, 1f));
-        var siny = 2f * (q.W * q.Y + q.Z * q.X);
+        if (MathF.Abs(sinp) > 0.99999f)
+        {
+            // Gimbal lock
+            var yawLock = 2f * MathF.Atan2(q.X, q.W);
+            return (0f, pitch * 180f / MathF.PI, yawLock * 180f / MathF.PI);
+        }
+        var siny = 2f * (q.X * q.Z + q.W * q.Y);
         var cosy = 1f - 2f * (q.X * q.X + q.Y * q.Y);
         var yaw = MathF.Atan2(siny, cosy);
+        var sinr = 2f * (q.X * q.Y + q.W * q.Z);
+        var cosr = 1f - 2f * (q.X * q.X + q.Z * q.Z);
+        var roll = MathF.Atan2(sinr, cosr);
         return (
-            roll * 180f / MathF.PI,
+            roll  * 180f / MathF.PI,
             pitch * 180f / MathF.PI,
-            yaw * 180f / MathF.PI);
+            yaw   * 180f / MathF.PI);
     }
 }

@@ -6,8 +6,13 @@
 //   discover                  List every attached Rokid USB device.
 //   stream [--timeout SECONDS] Read & print IMU samples live (Ctrl+C to stop).
 //   parse <hex-bytes>         Decode a single hex-encoded packet and print the result.
+//   fusion-emit [--replay FILE] [--host HOST] [--port N]
+//                             Read IMU samples, run Mahony fusion, emit
+//                             FreePIE-compatible orientation over UDP.
 
+using RokidDiyStation.Core.Fusion;
 using RokidDiyStation.Core.HidCapture;
+using RokidDiyStation.Core.Output;
 using RokidDiyStation.Core.Protocol;
 
 namespace RokidDiyStation.Cli;
@@ -33,6 +38,7 @@ internal static class Program
                 "parse"           => Parse(args.AsSpan(1)),
                 "diagnose"        => Diagnose(),
                 "diagnose-sharp"  => DiagnoseSharp(),
+                "fusion-emit"     => FusionEmit(args.AsSpan(1)),
                 "-h" or "--help" or "help" => PrintUsage(),
                 _ => UnknownCommand(args[0]),
             };
@@ -198,6 +204,12 @@ internal static class Program
         Console.WriteLine("  rokid-station-cli discover-sharp");
         Console.WriteLine("  rokid-station-cli diagnose-sharp");
         Console.WriteLine("  rokid-station-cli stream-sharp [--timeout SECONDS] [--count N]");
+        Console.WriteLine();
+        Console.WriteLine("Fusion + FreePIE UDP output (M4):");
+        Console.WriteLine("  rokid-station-cli fusion-emit [--replay FILE] [--host HOST] [--port N]");
+        Console.WriteLine("    --replay FILE  Read samples from a binary capture (45 B/sample) instead of the live device.");
+        Console.WriteLine("    --host  HOST   Target host for FreePIE UDP packets (default 127.0.0.1).");
+        Console.WriteLine("    --port  N      Target UDP port (default 5555).");
         return 0;
     }
 
@@ -295,5 +307,88 @@ internal static class Program
         Console.Error.WriteLine($"unknown command: {command}");
         Console.Error.WriteLine("run without arguments for usage.");
         return 2;
+    }
+
+    // ---------- M4 fusion + FreePIE UDP emit ----------
+
+    private static int FusionEmit(ReadOnlySpan<string> args)
+    {
+        var replay = ParseStringFlag(args, "replay", fallback: null);
+        var host   = ParseStringFlag(args, "host",   fallback: "127.0.0.1") ?? "127.0.0.1";
+        var port   = ParseIntFlag(args, "port",    fallback: 5555);
+        var timeoutSec = ParseIntFlag(args, "timeout", fallback: 0);
+
+        var opts = new FreePieEmitterOptions(
+            TargetHost: host,
+            TargetPort: port,
+            MaxPacketsPerSecond: 250);
+        using var emitter = new FreePieEmitter(opts);
+        var fusion = new MahonyFusion();
+        using var cts = timeoutSec > 0 ? new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec)) : null;
+
+        Console.WriteLine($"# fusion-emit -> {host}:{port}  replay={(replay ?? "<live>")}");
+
+        if (replay is not null)
+        {
+            if (!File.Exists(replay))
+            {
+                Console.Error.WriteLine($"replay file not found: {replay}");
+                return 2;
+            }
+            var bytes = File.ReadAllBytes(replay);
+            const int stride = 45;
+            var n = bytes.Length / stride;
+            for (var i = 0; i < n; i++)
+            {
+                if (cts?.IsCancellationRequested == true) break;
+                var off = i * stride;
+                var sample = new ImuSample(
+                    BitConverter.ToUInt64(bytes, off),
+                    new System.Numerics.Vector3(
+                        BitConverter.ToSingle(bytes, off + 8),
+                        BitConverter.ToSingle(bytes, off + 12),
+                        BitConverter.ToSingle(bytes, off + 16)),
+                    new System.Numerics.Vector3(
+                        BitConverter.ToSingle(bytes, off + 20),
+                        BitConverter.ToSingle(bytes, off + 24),
+                        BitConverter.ToSingle(bytes, off + 28)),
+                    new System.Numerics.Vector3(
+                        BitConverter.ToSingle(bytes, off + 32),
+                        BitConverter.ToSingle(bytes, off + 36),
+                        BitConverter.ToSingle(bytes, off + 40)),
+                    bytes[off + 44] != 0,
+                    0);
+                fusion.Update(sample);
+                emitter.Send(fusion.Orientation);
+            }
+            Console.WriteLine($"# sent {emitter.PacketsSent} packets, {emitter.PacketsFailed} failed");
+            return 0;
+        }
+
+        // Live mode: open the device and stream.
+        using var device = HidSharpEnumerator.OpenFirst();
+        Console.WriteLine($"# streaming from {device.ProductName} (VID=0x{device.VendorId:X4} PID=0x{device.ProductId:X4})");
+        var total = 0;
+        while (true)
+        {
+            if (cts?.IsCancellationRequested == true) break;
+            if (!device.TryRead(timeoutMs: 100, out var report)) continue;
+            var result = PacketParser.Parse(report);
+            if (!result.IsOk) continue;
+            fusion.Update(result.Value);
+            emitter.Send(fusion.Orientation);
+            total++;
+        }
+        Console.WriteLine($"# sent {emitter.PacketsSent} packets ({emitter.PacketsFailed} failed) over {total} live samples");
+        return 0;
+    }
+
+    private static string? ParseStringFlag(ReadOnlySpan<string> args, string name, string? fallback)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == $"--{name}") return args[i + 1];
+        }
+        return fallback;
     }
 }
