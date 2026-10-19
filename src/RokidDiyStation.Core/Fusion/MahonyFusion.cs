@@ -100,7 +100,15 @@ public sealed class MahonyFusion
     /// <summary>
     /// Feed one IMU sample.  Returns the status of the update.
     /// </summary>
-    public FusionResult Update(in ImuSample sample)
+    /// <param name="accelTrust">1.0 = full accel correction, 0.0 = skip
+    /// accel correction entirely.  Pass 0 while the device is known
+    /// to be stationary and the user is wearing it at a non-upright
+    /// angle — Mahony otherwise assumes the gravity vector is along
+    /// +Y in the world frame and will continuously rotate the
+    /// orientation to "correct" the constant tilt.  This is the root
+    /// cause of the steady Euler drift observed on real Rokid
+    /// hardware.</param>
+    public FusionResult Update(in ImuSample sample, float accelTrust = 1f)
     {
         // 1. dt
         if (!_primed)
@@ -170,8 +178,8 @@ public sealed class MahonyFusion
             }
         }
 
-        var totalErr = accelErr * _tuning.KpAccel + magErr * _tuning.KpMag;
-        _integralAccel += accelErr * _tuning.KiAccel * dt;
+        var totalErr = accelErr * (_tuning.KpAccel * accelTrust) + magErr * _tuning.KpMag;
+        _integralAccel += accelErr * (_tuning.KiAccel * accelTrust) * dt;
         _integralMag += magErr * _tuning.KiMag * dt;
         totalErr += _integralAccel + _integralMag;
 

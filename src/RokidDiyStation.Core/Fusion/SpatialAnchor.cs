@@ -134,7 +134,16 @@ public sealed class SpatialAnchor
         // 3. Subtract the running bias (zero until calibrated) and feed Mahony.
         var gyroCorrected = sample.Gyro - _bias.Bias;
         var sampleCorrected = sample with { Gyro = gyroCorrected };
-        _fusion.Update(sampleCorrected);
+        // When the device is stationary, the accel vector is constant
+        // (= -gravity in the device frame, tilted by the wear angle).
+        // Mahony's accel correction will interpret that constant tilt
+        // as a residual and rotate the orientation to "fix" it,
+        // causing the steady drift we see in the diagnostic.  Skip
+        // accel correction while stationary — the gyro has already
+        // been bias-corrected and is the better reference for short
+        // integrations.  The complementary mag correction still
+        // applies so the absolute heading is preserved.
+        _fusion.Update(sampleCorrected, accelTrust: isStationary ? 0f : 1f);
 
         // 4. Compute world-frame linear accel = R*(accel_device) - gravity.
         //    We rotate by q (the head's orientation in world frame) and

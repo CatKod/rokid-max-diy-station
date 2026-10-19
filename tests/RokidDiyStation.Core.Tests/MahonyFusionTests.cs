@@ -68,6 +68,37 @@ public class MahonyFusionTests
     }
 
     [Fact]
+    public void Stationary_With_NonUpright_Accel_Does_Not_Drift_When_AccelTrust_Is_Zero()
+    {
+        // Real Rokid hardware: when the user wears the glasses, the
+        // accel vector is tilted relative to world +Y (the glasses
+        // sit at ~20° back-tilt on the nose).  Mahony's accel
+        // correction will try to "fix" this tilt and cause the
+        // orientation to drift continuously even though the user
+        // is perfectly still.  Passing accelTrust=0 (which the
+        // SpatialAnchor does when the stationary detector agrees)
+        // must keep the orientation stable in that scenario.
+        var f = new MahonyFusion();
+        var src = new SyntheticImuSource();
+        // 5 s of stationary samples; the synthetic source already
+        // produces a non-upright accel (the rest pose has +Y gravity
+        // and a small tilt) which is what the SpatialAnchor feeds in
+        // for a real user.
+        var samples = src.StepEuler(_ => (0f, 0f, 0f), seconds: 5.0f).ToArray();
+        foreach (var s in samples) f.Update(s, accelTrust: 0f);
+        var q = f.Orientation;
+        Assert.True(IsFinite(in q));
+        var (roll, pitch, yaw) = SyntheticImuSource.ToEulerZYX(q);
+        // Without accel correction the orientation should be a
+        // near-identity quaternion; the small drift that does occur
+        // comes from the gyro integral accumulating the residual
+        // bias (windowSize samples have been collected by now).
+        Assert.InRange(MathF.Abs(roll),  0, 3f);
+        Assert.InRange(MathF.Abs(pitch), 0, 3f);
+        Assert.InRange(MathF.Abs(yaw),   0, 3f);
+    }
+
+    [Fact]
     public void Synthetic_Yaw_Trajectory_Is_Tracked()
     {
         // Spin 90° in 0.5 s, hold 0.5 s, return to 0 in 0.5 s.
