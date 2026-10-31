@@ -19,7 +19,7 @@ public class GyroBiasEstimatorTests
     [Fact]
     public void Bias_Starts_At_Zero()
     {
-        var b = new GyroBiasEstimator(windowSize: 4);
+        var b = new GyroBiasEstimator();
         Assert.Equal(Vector3.Zero, b.Bias);
         Assert.False(b.IsCalibrated);
     }
@@ -27,38 +27,35 @@ public class GyroBiasEstimatorTests
     [Fact]
     public void Bias_Converges_To_Constant_Offset()
     {
-        var b = new GyroBiasEstimator(windowSize: 8);
+        var b = new GyroBiasEstimator(tauSeconds: 0.05);
         var trueBias = new Vector3(0.01f, -0.02f, 0.005f);
-        for (var i = 0; i < 16; i++) b.Add(trueBias);
+        for (int i = 0; i < 2000; i++) b.Add(trueBias, 1.0 / 437.0);
         Assert.True(b.IsCalibrated);
-        Assert.InRange(MathF.Abs(b.Bias.X - 0.01f), 0, 1e-6f);
-        Assert.InRange(MathF.Abs(b.Bias.Y + 0.02f), 0, 1e-6f);
-        Assert.InRange(MathF.Abs(b.Bias.Z - 0.005f), 0, 1e-6f);
+        Assert.InRange(MathF.Abs(b.Bias.X - 0.01f), 0, 1e-3f);
+        Assert.InRange(MathF.Abs(b.Bias.Y + 0.02f), 0, 1e-3f);
+        Assert.InRange(MathF.Abs(b.Bias.Z - 0.005f), 0, 1e-3f);
     }
 
     [Fact]
-    public void Bias_Freezes_After_Window_Fills()
+    public void Bias_Tracks_Slow_Thermal_Drift()
     {
-        var b = new GyroBiasEstimator(windowSize: 4);
-        b.Add(new Vector3(0.01f, 0, 0));
-        b.Add(new Vector3(0.01f, 0, 0));
-        b.Add(new Vector3(0.01f, 0, 0));
-        b.Add(new Vector3(0.01f, 0, 0));
-        Assert.True(b.IsCalibrated);
-        var frozen = b.Bias;
-        // Adding more samples (even garbage) shouldn't move the bias.
-        b.Add(new Vector3(99, 99, 99));
-        Assert.Equal(frozen, b.Bias);
+        // The point of an EMA rather than a frozen average: MEMS
+        // zero-rate offset moves with temperature, so the estimate has
+        // to follow it instead of being pinned to a stale value.
+        var b = new GyroBiasEstimator(tauSeconds: 0.2);
+        for (int i = 0; i < 1000; i++) b.Add(new Vector3(0.004f, 0, 0), 1.0 / 437.0);
+        Assert.InRange(MathF.Abs(b.Bias.X - 0.004f), 0, 5e-4f);
+
+        // The bias moves (the glasses warmed up).
+        for (int i = 0; i < 1000; i++) b.Add(new Vector3(0.008f, 0, 0), 1.0 / 437.0);
+        Assert.InRange(MathF.Abs(b.Bias.X - 0.008f), 0, 1e-3f);
     }
 
     [Fact]
     public void Reset_Clears_State()
     {
-        var b = new GyroBiasEstimator(windowSize: 4);
-        b.Add(new Vector3(0.01f, 0, 0));
-        b.Add(new Vector3(0.01f, 0, 0));
-        b.Add(new Vector3(0.01f, 0, 0));
-        b.Add(new Vector3(0.01f, 0, 0));
+        var b = new GyroBiasEstimator();
+        for (int i = 0; i < 500; i++) b.Add(new Vector3(0.01f, 0, 0), 1.0 / 437.0);
         Assert.True(b.IsCalibrated);
         b.Reset();
         Assert.False(b.IsCalibrated);

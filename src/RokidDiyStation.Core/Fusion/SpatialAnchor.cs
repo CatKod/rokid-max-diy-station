@@ -41,16 +41,20 @@ public enum AnchorState
 public sealed class SpatialAnchor
 {
     private readonly MahonyFusion _fusion;
-    private readonly GyroBiasEstimator _bias = new(windowSize: 1024);
+    private readonly GyroBiasEstimator _bias = new(tauSeconds: 2.0);
     private readonly StationaryDetector _stationary = new();
     private readonly PositionIntegrator _position = new();
+    private ulong _lastTimestampNs;
 
     private AnchorState _state = AnchorState.Booting;
     private int _samplesSinceReset;
 
     public SpatialAnchor(MahonyTuning? tuning = null, bool useMagnetometer = true)
     {
-        _fusion = new MahonyFusion(tuning ?? MahonyTuning.Default, useMagnetometer);
+        // Pass the nullable straight through: MahonyFusion resolves null
+        // to MahonyTuning.Default and validates the result, so there is
+        // exactly one place that knows what "no tuning given" means.
+        _fusion = new MahonyFusion(tuning, useMagnetometer);
     }
 
     public AnchorState State => _state;
@@ -78,6 +82,7 @@ public sealed class SpatialAnchor
         _state = AnchorState.Booting;
         _samplesSinceReset = 0;
         _autoAnchored = false;
+        _lastTimestampNs = 0;
         _anchorInv = (Quaternion.Identity, Vector3.Zero);
         HeadOrientation = Quaternion.Identity;
         HeadPosition = Vector3.Zero;
@@ -125,29 +130,39 @@ public sealed class SpatialAnchor
         var stationary = _stationary.Update(sample.Gyro, sample.Accel, sample.TimestampNs);
         var isStationary = stationary == StationaryState.Stationary;
 
-        // 2. Gyro bias: feed it only when stationary, freeze when full.
+        // 2. Gyro bias: feed it only when stationary, so that motion
+        //    never contaminates the estimate.
         if (isStationary)
         {
-            _bias.Add(sample.Gyro);
+            var dt = _lastTimestampNs > 0
+                ? Math.Clamp((sample.TimestampNs - _lastTimestampNs) * 1e-9, 0.0, 0.1)
+                : 1.0 / 437.0;
+            _bias.Add(sample.Gyro, dt);
         }
+        _lastTimestampNs = sample.TimestampNs;
 
         // 3. Subtract the running bias (zero until calibrated) and feed Mahony.
         var gyroCorrected = sample.Gyro - _bias.Bias;
         var sampleCorrected = sample with { Gyro = gyroCorrected };
-        // When the device is stationary, the accel vector is constant
-        // (= -gravity in the device frame, tilted by the wear angle).
-        // Mahony's accel correction will interpret that constant tilt
-        // as a residual and rotate the orientation to "fix" it,
-        // causing the steady drift we see in the diagnostic.  Skip
-        // accel correction while stationary — the gyro has already
-        // been bias-corrected and is the better reference for short
-        // integrations.  The complementary mag correction still
-        // applies so the absolute heading is preserved.
-        _fusion.Update(sampleCorrected, accelTrust: isStationary ? 0f : 1f);
+        // Keep the accelerometer correction ACTIVE, including while the
+        // device is stationary.  At a constant resting tilt the
+        // accelerometer error term a × v̂ is exactly zero, so the
+        // correction does nothing harmful — but it is also the ONLY
+        // thing pinning pitch and roll to gravity.  Disabling it while
+        // stationary (as this code used to do) turned the filter into
+        // open-loop gyro integration and produced a measured, linear
+        // ~0.3°/min of roll drift on real Rokid Max hardware.  The
+        // filter's own dynamic-acceleration rejection now handles the
+        // genuinely disturbed case, where linear acceleration makes the
+        // accelerometer disagree with gravity.
+        _fusion.Update(sampleCorrected, accelTrust: 1f);
 
         // 4. Compute world-frame linear accel = R*(accel_device) - gravity.
-        //    We rotate by q (the head's orientation in world frame) and
-        //    subtract (0, G, 0).
+        //    The accelerometer measures the reaction to gravity, i.e.
+        //    the direction of world up expressed in the device frame.
+        //    Rotating it by R (device->world) brings it back into the
+        //    world frame; subtracting gravity then leaves only the
+        //    genuine linear acceleration.
         var accelWorld = Vector3.Transform(sample.Accel, _fusion.Orientation)
                          - new Vector3(0, StationaryDetector.GravityMagnitude, 0);
 

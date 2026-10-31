@@ -21,13 +21,34 @@ public sealed class HotkeyBinding : IDisposable
     private bool _registered;
     private readonly HwndSource _source;
 
-    public HotkeyBinding(int id, uint modifiers, uint key, Window hostWindow)
+    /// <summary>
+    /// Create a hotkey bound to a key combination.
+    /// </summary>
+    /// <remarks>
+    /// The binding owns a private, message-only window.  It cannot
+    /// borrow the settings window's HWND: the app starts minimised by
+    /// default, and a WPF <see cref="Window"/> that has never been
+    /// shown has no HWND yet, so <c>WindowInteropHelper.Handle</c>
+    /// returns zero and every RegisterHotKey call fails with
+    /// ERROR_INVALID_WINDOW_HANDLE.
+    ///
+    /// HWND_MESSAGE (-3) as the parent makes the window invisible and
+    /// unreachable from the taskbar or Alt+Tab, which is exactly what
+    /// we want for a global hotkey sink.
+    /// </remarks>
+    public HotkeyBinding(int id, uint modifiers, uint key)
     {
         Id = id;
         Modifiers = modifiers;
         Key = key;
-        var helper = new WindowInteropHelper(hostWindow);
-        _source = HwndSource.FromHwnd(helper.Handle) ?? throw new InvalidOperationException("Window handle not ready");
+
+        var parameters = new HwndSourceParameters("RokidDiyStation.HotkeySink")
+        {
+            // HWND_MESSAGE: a message-only window.
+            ParentWindow = new IntPtr(-3),
+            WindowStyle = 0,
+        };
+        _source = new HwndSource(parameters);
         _source.AddHook(WndProc);
     }
 
@@ -50,13 +71,26 @@ public sealed class HotkeyBinding : IDisposable
         const int WM_HOTKEY = 0x0312;
         if (msg == WM_HOTKEY && wParam.ToInt32() == Id)
         {
-            try { Pressed?.Invoke(); } catch { }
+            try { Pressed?.Invoke(); }
+            catch (Exception ex)
+            {
+                // Never let a handler exception escape into the WndProc:
+                // an exception thrown from a native window procedure
+                // terminates the process.  Report it instead.
+                System.Diagnostics.Debug.WriteLine(
+                    $"Hotkey handler failed: {ex}");
+            }
             handled = true;
         }
         return IntPtr.Zero;
     }
 
-    public void Dispose() => Unregister();
+    public void Dispose()
+    {
+        Unregister();
+        _source.RemoveHook(WndProc);
+        _source.Dispose();
+    }
 }
 
 internal static class NativeMethods

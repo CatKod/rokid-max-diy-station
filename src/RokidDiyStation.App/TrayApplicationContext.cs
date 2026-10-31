@@ -7,6 +7,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Input;
 using H.NotifyIcon;
+using RokidDiyStation.App.Spatial;
 
 namespace RokidDiyStation.App;
 
@@ -18,16 +19,42 @@ public sealed class TrayApplicationContext
     private readonly TaskbarIcon _tray;
     private readonly MainWindow _mainWindow;
     private readonly NotifyIconHost _host;
+    private readonly SpatialStation _station;
     private HotkeyBinding? _spaceHotkey;
     private HotkeyBinding? _rHotkey;
     private HotkeyBinding? _cHotkey;
     private HotkeyBinding? _showHotkey;
+    private HotkeyBinding? _pinHotkey;
     private bool _quitting;
+
+    /// <summary>
+    /// Translate the user-facing settings into the anchor service's
+    /// options.
+    /// </summary>
+    /// <remarks>
+    /// The two live in different layers on purpose: <see cref="AppSettings"/>
+    /// is the persisted, user-editable surface, and
+    /// <see cref="Core.Spatial.SpatialAnchorOptions"/> is the tuning
+    /// surface of the spatial maths.  This is the only place that
+    /// knows how to map one onto the other.
+    /// </remarks>
+    private static Core.Spatial.SpatialAnchorOptions BuildAnchorOptions(AppSettings s) => new()
+    {
+        UseMagnetometer = s.UseMagnetometer,
+        LazyFollowDeadzoneDegrees = (float)Math.Clamp(s.LazyFollowDeadzoneDegrees, 0.0, 45.0),
+        LazyFollowRatePerSecond = (float)Math.Clamp(s.LazyFollowRatePerSecond, 0.0, 10.0),
+        NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
+        PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),
+        PanelFovFraction = (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0),
+    };
 
     public TrayApplicationContext(SettingsService settingsService, TrackingService tracking)
     {
         _settingsService = settingsService;
         _tracking = tracking;
+        // The station shares the tracker's anchor, so the panel and the
+        // head pose live in the same world frame.
+        _station = new SpatialStation(BuildAnchorOptions(settingsService.Current), tracking.Anchor);
         _mainWindow = new MainWindow(_settingsService, _autostart, _tracking);
         // The host window is the WPF visual-tree parent for the TaskbarIcon.
         // It is created and never shown to the user (see NotifyIconHost).
@@ -48,23 +75,115 @@ public sealed class TrayApplicationContext
 
         _tracking.StatusChanged += OnStatusChanged;
         _tracking.OnLog += line => _mainWindow.AppendLog(line);
-        _tracking.Start();
 
-        // The actual window show is deferred to OnApplicationStarted
-        // so the WPF dispatcher is alive.  See Program.cs.
+        // The station shares the tracker's anchor, so the panel and the
+        // head pose live in the same world frame.
+        _tracking.AttachStation(_station);
+        _station.OnLog += line => _mainWindow.AppendLog(line);
+        _mainWindow.AttachStation(_station);
+        _station.OnStatus += (state, msg) =>
+        {
+            _tray.ToolTipText = state switch
+            {
+                SpatialState.Capturing => $"Rokid DiyStation — {_station.Anchor.Panel?.Width * 100:0} cm panel live",
+                SpatialState.Searching => $"Rokid DiyStation — {msg}",
+                SpatialState.Error     => $"Rokid DiyStation — {msg}",
+                _                      => "Rokid DiyStation",
+            };
+        };
+
+        _tracking.Start();
+        // The spatial station is started in OnApplicationStarted, once
+        // the WPF dispatcher is running.  Starting it here would let
+        // the render thread call back into the UI (to log) before
+        // there is a message pump to service the request.
     }
 
     private System.Windows.Controls.ContextMenu BuildContextMenu()
     {
         var menu = new System.Windows.Controls.ContextMenu();
-        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Show settings (Ctrl+Alt+R)", Command = new RelayCommand(_ => ShowMainWindow()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Show settings", Command = new RelayCommand(_ => ShowMainWindow()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
-        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Set anchor here (Ctrl+Space)", Command = new RelayCommand(_ => _tracking.SetAnchorHere()) });
-        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Reset anchor (Ctrl+R)",       Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
-        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Recenter view (Ctrl+C)",      Command = new RelayCommand(_ => _mainWindow.Recenter()) });
+        menu.Items.Add(BuildPinSubmenu());
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Pin panel here (Ctrl+Space)", Command = new RelayCommand(_ => _tracking.SetAnchorHere()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Forget the panel (Ctrl+R)",     Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Recenter view (Ctrl+C)",        Command = new RelayCommand(_ => _mainWindow.Recenter()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Quit", Command = new RelayCommand(_ => Quit()) });
         return menu;
+    }
+
+    /// <summary>
+    /// The "Pin a window" submenu, listing the currently visible
+    /// top-level windows so the user can choose one to project onto
+    /// the glasses.
+    /// </summary>
+    /// <remarks>
+    /// The list is rebuilt every time the menu opens, because windows
+    /// come and go.  It is built on the UI thread, which is where the
+    /// menu lives.
+    /// </remarks>
+    private System.Windows.Controls.MenuItem BuildPinSubmenu()
+    {
+        var pin = new System.Windows.Controls.MenuItem { Header = "Pin a window…" };
+        var refresh = new System.Windows.Controls.MenuItem
+        {
+            Header = "Refresh list",
+            Command = new RelayCommand(_ => RefreshPinSubmenu(pin)),
+        };
+
+        void Populate()
+        {
+            pin.Items.Clear();
+            pin.Items.Add(refresh);
+            pin.Items.Add(new System.Windows.Controls.Separator());
+
+            var windows = WindowPicker.List();
+            if (windows.Count == 0)
+            {
+                pin.Items.Add(new System.Windows.Controls.MenuItem
+                {
+                    Header = "(no capturable windows found)",
+                    IsEnabled = false,
+                });
+                return;
+            }
+
+            foreach (var w in windows.Take(30))
+            {
+                var entry = w;
+                pin.Items.Add(new System.Windows.Controls.MenuItem
+                {
+                    Header = entry.ToString(),
+                    Command = new RelayCommand(_ => PinWindow(entry.Handle)),
+                });
+            }
+        }
+
+        pin.SubmenuOpened += (_, _) => Populate();
+        Populate();
+        return pin;
+    }
+
+    private void RefreshPinSubmenu(System.Windows.Controls.MenuItem pin)
+    {
+        var parent = pin.Parent as System.Windows.Controls.ItemsControl;
+        var idx = parent?.Items.IndexOf(pin) ?? -1;
+        if (parent is null || idx < 0) return;
+        var replacement = BuildPinSubmenu();
+        parent.Items.RemoveAt(idx);
+        parent.Items.Insert(idx, replacement);
+    }
+
+    private void PinWindow(IntPtr hwnd)
+    {
+        _mainWindow.AppendLog($"Pinning window 0x{hwnd.ToInt64():X}.");
+        _station.QueueCapture(hwnd);
+        // Pin the panel where the user is looking RIGHT NOW, before any
+        // drift has accumulated.  The capture takes a moment to start,
+        // so the panel is placed at the pose the user had when they
+        // pressed the hotkey.
+        _station.AnchorHere();
     }
 
     private bool _started;
@@ -77,6 +196,13 @@ public sealed class TrayApplicationContext
         if (_started) return;
         _started = true;
         RegisterHotkeys();
+
+        // Now that the dispatcher is alive, bring up the spatial
+        // station: it opens the render window on the glasses' display
+        // and starts pumping frames.
+        try { _station.Start(); }
+        catch (Exception ex) { _mainWindow.AppendLog($"Spatial station failed to start: {ex.Message}"); }
+
         _mainWindow.AppendLog($"Diagnostic log mirrored to: {TrackingService.DiagnosticLogPath}");
         if (_settingsService.Current.StartMinimised)
         {
@@ -157,13 +283,13 @@ public sealed class TrayApplicationContext
         if (_spaceHotkey is not null)
             _spaceHotkey.Pressed += () => _tracking.SetAnchorHere();
         else
-            _mainWindow.AppendLog("Hotkey Ctrl+Space (set anchor) unavailable — another app may own it.");
+            _mainWindow.AppendLog("Hotkey Ctrl+Space (pin panel here) unavailable — another app may own it.");
 
         _rHotkey = TryHotkey(2, NativeMethods.MOD_CTRL, 0x52 /* VK_R */);
         if (_rHotkey is not null)
             _rHotkey.Pressed += () => _tracking.ResetAnchor();
         else
-            _mainWindow.AppendLog("Hotkey Ctrl+R (reset anchor) unavailable.");
+            _mainWindow.AppendLog("Hotkey Ctrl+R (forget the panel) unavailable.");
 
         _cHotkey = TryHotkey(3, NativeMethods.MOD_CTRL, 0x43 /* VK_C */);
         if (_cHotkey is not null)
@@ -171,26 +297,99 @@ public sealed class TrayApplicationContext
         else
             _mainWindow.AppendLog("Hotkey Ctrl+C (recenter) unavailable.");
 
-        // Show/hide window hotkey — Ctrl+Alt+R is a deliberately
-        // awkward combo so we don't clash with common shortcuts.
-        _showHotkey = TryHotkey(4, NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x52 /* VK_R */);
+        // Show/hide window hotkey.  Ctrl+Alt+R is the intended combo,
+        // but other apps own it on some machines, so fall back to a
+        // list of alternates rather than silently losing the feature.
+        _showHotkey = TryHotkeyWithFallback(4, "show/hide window", new[]
+        {
+            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x52u, "Ctrl+Alt+R"),
+            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x48u, "Ctrl+Alt+H"),
+            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x53u, "Ctrl+Alt+S"),
+            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x4Fu, "Ctrl+Alt+O"),
+        });
         if (_showHotkey is not null)
             _showHotkey.Pressed += () => ToggleMainWindow();
         else
-            _mainWindow.AppendLog("Hotkey Ctrl+Alt+R (show/hide window) unavailable.");
+            _mainWindow.AppendLog("No free hotkey found for show/hide window — use the tray icon.");
+
+        // Pin the foreground window to the glasses.  This is the
+        // primary interaction of the whole product, so it gets the
+        // easiest-to-reach combo.
+        _pinHotkey = TryHotkeyWithFallback(5, "pin foreground window", new[]
+        {
+            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x50u, "Ctrl+Alt+P"),
+            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT, 0x50u, "Ctrl+Alt+Shift+P"),
+            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x47u, "Ctrl+Alt+G"),
+        });
+        if (_pinHotkey is not null)
+            _pinHotkey.Pressed += () => PinForegroundWindow();
+        else
+            _mainWindow.AppendLog("No free hotkey found for pin foreground window — use the tray menu.");
+    }
+
+    /// <summary>
+    /// Register the first hotkey combination in <paramref name="candidates"/>
+    /// that no other application already owns.
+    /// </summary>
+    /// <remarks>
+    /// RegisterHotKey fails with ERROR_HOTKEY_ALREADY_REGISTERED when
+    /// another process holds the combination.  That is a property of
+    /// the machine, not of our app, so the only sensible response is
+    /// to try the next candidate.
+    /// </remarks>
+    private HotkeyBinding? TryHotkeyWithFallback(
+        int id,
+        string action,
+        (uint Modifiers, uint Key, string Label)[] candidates)
+    {
+        foreach (var (modifiers, key, label) in candidates)
+        {
+            var hk = TryHotkey(id, modifiers, key);
+            if (hk is not null)
+            {
+                _mainWindow.AppendLog($"Hotkey {label} bound to \"{action}\".");
+                return hk;
+            }
+        }
+
+        _mainWindow.AppendLog(
+            $"Every candidate hotkey for \"{action}\" is owned by another app.");
+        return null;
+    }
+
+    /// <summary>
+    /// Pin the window the user is currently looking at.
+    /// </summary>
+    /// <remarks>
+    /// The foreground window is the one under the mouse cursor when the
+    /// cursor is over a window, otherwise the one with keyboard focus.
+    /// We prefer the cursor's window because the user is usually
+    /// pointing at the thing they want to pin, while focus may still be
+    /// on the app they launched it from.
+    /// </remarks>
+    private void PinForegroundWindow()
+    {
+        var hwnd = WindowPicker.GetCursorWindow();
+        if (hwnd == IntPtr.Zero)
+        {
+            _mainWindow.AppendLog("No window under the cursor to pin.");
+            return;
+        }
+        PinWindow(hwnd);
     }
 
     private HotkeyBinding? TryHotkey(int id, uint modifiers, uint vk)
     {
         try
         {
-            var hk = new HotkeyBinding(id, modifiers, vk, _mainWindow);
+            var hk = new HotkeyBinding(id, modifiers, vk);
             if (hk.Register()) return hk;
             hk.Dispose();
             return null;
         }
-        catch
+        catch (Exception ex)
         {
+            _mainWindow.AppendLog($"Hotkey registration threw: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
     }
@@ -239,10 +438,12 @@ public sealed class TrayApplicationContext
         if (_quitting) return;
         _quitting = true;
         _tracking.Stop();
+        _station.Dispose();
         try { _spaceHotkey?.Dispose(); } catch { }
         try { _rHotkey?.Dispose(); } catch { }
         try { _cHotkey?.Dispose(); } catch { }
         try { _showHotkey?.Dispose(); } catch { }
+        try { _pinHotkey?.Dispose(); } catch { }
         try { _settingsService.Save(); } catch { }
         _tray.Visibility = Visibility.Collapsed;
         // Mark the window so its OnClosing handler won't intercept.

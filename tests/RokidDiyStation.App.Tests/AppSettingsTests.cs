@@ -19,7 +19,17 @@ public class AppSettingsTests
         var s = AppSettings.Default;
         Assert.Equal("127.0.0.1", s.UdpHost);
         Assert.InRange(s.UdpPort, 1, 65535);
-        Assert.True(s.UseMagnetometer);
+
+        // The magnetometer must be OFF by default.  The Rokid Max's
+        // mag reads around 108 uT indoors, well outside Earth's
+        // 25-65 uT field, because the metal chassis dominates the
+        // reading.  Indoors the heading correction is then worse than
+        // no correction at all, and it fights the gyro in a way the
+        // user sees as the screen swinging around.  Every production
+        // 3DoF runtime (Virtual Desktop, SteamVR, Bigscreen) resolves
+        // heading by hand, not by compass.
+        Assert.False(s.UseMagnetometer);
+
         Assert.Equal(0.0, s.Smoothing);
         Assert.Equal(60.0, s.FovDegrees);
         Assert.False(s.Autostart);

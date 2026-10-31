@@ -46,3 +46,10 @@ logs/
 ## Local config
 appsettings.*.local.json
 secrets.json
+
+## Research scratch (Gemini deep-research working files)
+.research/
+
+## Rendered panel snapshots (regenerate with tools/PanelSnapshot)
+artifacts/
+panel*.png

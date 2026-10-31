@@ -1,0 +1,18 @@
+using System;
+using System.Linq;
+using System.Reflection;
+
+var asm = Assembly.LoadFrom(@"C:\Users\kimvi\.nuget\packages\vortice.direct3d11\3.8.3\lib\net8.0\Vortice.Direct3D11.dll");
+foreach (var n in new[] { "Vortice.Direct3D11.CpuAccessFlags", "Vortice.Direct3D11.MapFlags", "Vortice.Direct3D11.MapMode" })
+{
+    var t = asm.GetType(n);
+    Console.WriteLine($"== {n} => {(t is null ? "NOT FOUND" : "found")}");
+    if (t is null) continue;
+    foreach (var f in t.GetFields(BindingFlags.Public | BindingFlags.Static))
+        Console.WriteLine($"   {f.Name} = {f.GetValue(null)}");
+}
+
+var ctx = asm.GetType("Vortice.Direct3D11.ID3D11DeviceContext");
+Console.WriteLine("== Map overloads");
+foreach (var m in ctx!.GetMethods().Where(m => m.Name == "Map"))
+    Console.WriteLine("   " + m);

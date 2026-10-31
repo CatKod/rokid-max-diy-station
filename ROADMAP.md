@@ -77,16 +77,70 @@ A living plan. PRs that move items forward get a fast-review promise.
 - [ ] MSIX / installer (deferred — the exe runs from the build output)
 - [ ] Icon (.ico) — currently uses SystemIcons.Information as a placeholder
 
-## M7 — Niceties
+## M7 — Spatial anchoring on the glasses' display (pin a window in 3D)
+
+The product goal: a background tray app that reads the Rokid Max's
+3 DoF IMU and **pins a real desktop window in space** on the glasses'
+Micro-OLED display, so the window stays put as you move your head.
+
+- [x] `DisplayLocator` finds the Rokid Max's display (`\\.\DISPLAY5`,
+      Lontium `LBT4753` bridge) among the machine's monitors
+- [x] `WindowCapture` — Windows.Graphics.Capture of any top-level window
+- [x] `PanelRenderer` — D3D11 renderer: borderless topmost quad on the
+      glasses' display, DWM-composition-free (flip model), 60 FPS
+- [x] `SpatialAnchor` drives the panel's world pose from the fused IMU
+- [x] Anchor actions differentiated:
+  - [x] `Ctrl+Space` — re-pin the panel at the current gaze
+  - [x] `Ctrl+R` — forget the panel (drop the reference, keep calibration)
+  - [x] `Ctrl+C` — recenter the world origin **and** re-pin
+- [x] `DisplayGuard` — hide the panel the instant the glasses are
+      unplugged, so DWM cannot relocate it over the user's screen
+- [x] HLSL shaders compiled to DXBC at build time and embedded
+- [x] `tools/SpatialSelfTest` — live-hardware verification (IMU feed,
+      panel coverage %, FPS, error count)
+- [x] `tools/PanelSnapshot` — writes the actual backbuffer to a PNG so
+      mirroring / flipping / clipping can be checked by eye and by a
+      vision model
+- [x] Unit tests: projection math, anchor actions, display guard
+- [x] Real-device verification: panel dead-centre at 48.1% × 48.5% of
+      the display, 23.13% backbuffer coverage, 60 FPS, zero errors
+- [x] Vision-model verification of the backbuffer: not mirrored, not
+      flipped, no clipping, no UV seam, crisp legible text
+
+## M8 — Tray app polish
+- [x] H.NotifyIcon.Wpf (TaskbarIcon) + context menu (Open / Set anchor / Reset / Quit)
+- [x] Settings window (host/port, smoothing, FOV, mag, autostart, hotkey labels, log)
+- [x] JSON settings persistence in %APPDATA%\RokidDiyStation\settings.json (atomic write)
+- [x] Single-instance via named Mutex + named-pipe "show" signal
+- [x] Autostart via HKCU\…\Run (verified enable/disable round-trip)
+- [x] Global hotkeys via Win32 RegisterHotKey (Space=anchor, R=reset, C=recenter)
+- [x] TrackingService owns SpatialAnchor + emitter on a background thread; 5 Hz UI status
+- [x] OrientationSmoother (EMA) plumbed between anchor and emitter
+- [x] OrientationSmoother, AppSettings, SettingsService, AxisRemap tests
+- [x] Smoke tests: --discover, --reset, tray start/stop, settings.json persist, single-instance
+- [x] docs/M6-TRAY-APP.md
+- [x] **Hotkeys register against a private message-only window** — the
+      settings window may never have been shown (the app starts
+      minimised), and an unshown WPF window has no HWND, so every
+      `RegisterHotKey` used to fail silently
+- [x] **Hotkey fallback chain** — another app may own a combination
+      (ERROR_HOTKEY_ALREADY_REGISTERED); try the next candidate instead
+      of losing the feature
+- [x] **"Pin foreground window" actually works** — there is no
+      `GetCursorWindow` Win32 API; the old P/Invoke threw
+      `EntryPointNotFoundException` and the handler swallowed it.
+      Replaced with `GetCursorPos` + `WindowFromPoint` + `GetAncestor`
+- [x] Regression tests for all three of the above
+- [ ] MSIX / installer (deferred — the exe runs from the build output)
+- [x] Icon (.ico) — generated at build time by `generate-icon.ps1`
+
+## M9 — Niceties
 - [ ] WebSocket emitter (browser/Three.js demo)
 - [ ] CSV/JSON logging of the live pose for offline analysis
 - [ ] Drift visualisation tool (read CSV → plot)
-
-## M6 — Niceties
 - [ ] Virtual mouse (smooth-pan) output
-- [ ] WebSocket emitter for browser/Three.js demos
-- [ ] Recenter button + hotkey
 - [ ] Low-pass filter presets (game / sim / cinematic)
+- [ ] Fullscreen immersive mode (panel fills the whole Micro-OLED)
 
 ## Backlog
 - Support **Rokid Air** (same IMU? different HID report?)

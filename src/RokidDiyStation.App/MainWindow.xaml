@@ -9,6 +9,7 @@
     <Grid Margin="16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>  <!-- status -->
+            <RowDefinition Height="Auto"/>  <!-- spatial panel -->
             <RowDefinition Height="Auto"/>  <!-- UDP settings -->
             <RowDefinition Height="Auto"/>  <!-- tracking settings -->
             <RowDefinition Height="Auto"/>  <!-- hotkeys -->
@@ -29,6 +30,7 @@
                                TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
                     <TextBlock x:Name="PosText"     Foreground="#FF80CBC4" FontSize="11" FontFamily="Consolas" Margin="0,2,0,0"/>
                     <TextBlock x:Name="EulText"     Foreground="#FFFFCC80" FontSize="11" FontFamily="Consolas" Margin="0,2,0,0"/>
+                    <TextBlock x:Name="PanelText"   Foreground="#FFCE93D8" FontSize="11" FontFamily="Consolas" Margin="0,2,0,0"/>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
                     <Button x:Name="SetAnchorBtn" Content="Set Anchor" Click="OnSetAnchorClick"
@@ -44,8 +46,35 @@
             </Grid>
         </Border>
 
+        <!-- spatial panel -->
+        <GroupBox Grid.Row="1" Header="Spatial panel (Rokid Max)" Padding="8" Margin="0,0,0,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Source window" VerticalAlignment="Center"/>
+                <ComboBox Grid.Row="0" Grid.Column="1" x:Name="WindowPickerBox" Margin="8,0,8,0"
+                          DisplayMemberPath="Title" SelectionChanged="OnWindowSelected" ToolTip="The window to project onto the glasses"/>
+                <Button Grid.Row="0" Grid.Column="2" Content="Pin it" Click="OnPinClick" Padding="12,4"
+                        Background="#FF006064" Foreground="White" BorderThickness="0" Cursor="Hand"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Comfort cone" VerticalAlignment="Center" Margin="0,8,0,0"
+                           ToolTip="Inside this cone the panel is perfectly rigid. Outside it, the panel glides back towards your gaze."/>
+                <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="8,8,0,0">
+                    <Slider x:Name="LazyFollowSlider" Minimum="0" Maximum="30" TickFrequency="5" IsSnapToTickEnabled="True" Width="200"/>
+                    <TextBlock x:Name="LazyFollowLabel" VerticalAlignment="Center" MinWidth="80" Margin="8,0,0,0"/>
+                </StackPanel>
+            </Grid>
+        </GroupBox>
+
         <!-- UDP settings -->
-        <GroupBox Grid.Row="1" Header="Output (FreePIE UDP)" Padding="8" Margin="0,0,0,8">
+        <GroupBox Grid.Row="2" Header="Output (FreePIE UDP)" Padding="8" Margin="0,0,0,8">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="120"/>
@@ -69,20 +98,33 @@
         </GroupBox>
 
         <!-- tracking -->
-        <GroupBox Grid.Row="2" Header="Tracking" Padding="8" Margin="0,0,0,8">
+        <GroupBox Grid.Row="3" Header="Tracking" Padding="8" Margin="0,0,0,8">
             <StackPanel>
-                <CheckBox x:Name="MagBox"      Content="Use magnetometer (recommended)" Margin="0,0,0,4"/>
+                <CheckBox x:Name="MagBox"      Content="Use magnetometer (indoors this makes the panel jump — leave off)"
+                          ToolTip="The Rokid Max's magnetometer reads ~108 uT indoors, far outside Earth's 25-65 uT field. Turning it on makes the panel slew violently." Margin="0,0,0,4"/>
                 <CheckBox x:Name="RawPosBox"   Content="Emit head position (Raw X/Y/Z in metres)" IsChecked="True" Margin="0,0,0,4"/>
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                     <TextBlock Text="FOV: " VerticalAlignment="Center"/>
                     <TextBlock x:Name="FovLabel" Text="60°" VerticalAlignment="Center" MinWidth="40"/>
                     <Slider x:Name="FovSlider" Minimum="20" Maximum="120" TickFrequency="5" IsSnapToTickEnabled="True" Width="220" Margin="8,0,0,0"/>
                 </StackPanel>
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
+                    <TextBlock Text="Panel distance" VerticalAlignment="Center"
+                               ToolTip="How far the pinned panel sits from your eyes. The glasses' optics focus at roughly 2-2.5 m; much closer and your eyes have to work for it."/>
+                    <Slider x:Name="PanelDistanceSlider" Minimum="0.5" Maximum="5" TickFrequency="0.1" IsSnapToTickEnabled="True" Width="180" Margin="8,0,0,0"/>
+                    <TextBlock x:Name="PanelDistanceLabel" VerticalAlignment="Center" MinWidth="60" Margin="8,0,0,0"/>
+                </StackPanel>
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Neck model" VerticalAlignment="Center"
+                               ToolTip="How much of the kinematic neck model's eye translation to apply. Lower = more rigid, less swimming."/>
+                    <Slider x:Name="NeckScaleSlider" Minimum="0" Maximum="1" TickFrequency="0.1" IsSnapToTickEnabled="True" Width="180" Margin="8,0,0,0"/>
+                    <TextBlock x:Name="NeckScaleLabel" VerticalAlignment="Center" MinWidth="60" Margin="8,0,0,0"/>
+                </StackPanel>
             </StackPanel>
         </GroupBox>
 
         <!-- hotkeys -->
-        <GroupBox Grid.Row="3" Header="Hotkeys" Padding="8" Margin="0,0,0,8">
+        <GroupBox Grid.Row="4" Header="Hotkeys" Padding="8" Margin="0,0,0,8">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="160"/>
@@ -103,7 +145,7 @@
         </GroupBox>
 
         <!-- system -->
-        <GroupBox Grid.Row="4" Header="System" Padding="8" Margin="0,0,0,8">
+        <GroupBox Grid.Row="5" Header="System" Padding="8" Margin="0,0,0,8">
             <StackPanel>
                 <CheckBox x:Name="AutostartBox" Content="Start with Windows (auto-launch minimised)" Margin="0,0,0,4"/>
                 <CheckBox x:Name="StartMinBox"  Content="Start minimised to tray" Margin="0,0,0,4"/>
@@ -112,7 +154,7 @@
         </GroupBox>
 
         <!-- log -->
-        <GroupBox Grid.Row="5" Header="Status log" Padding="0">
+        <GroupBox Grid.Row="6" Header="Status log" Padding="0">
             <ListBox x:Name="LogList" Background="#FF0F172A" Foreground="#FFE0F2F1" FontFamily="Consolas" FontSize="11" BorderThickness="0"/>
         </GroupBox>
     </Grid>

@@ -43,9 +43,30 @@ public sealed class TrackingService : IDisposable
     private TrackingStatus _last = new(TrackingState.Stopped, "Idle", 0, false, false, Vector3.Zero, (0, 0, 0));
     private string? _lastError;
     private readonly OrientationSmoother _smoother;
+    private RokidDiyStation.Core.Fusion.SpatialAnchor? _anchor;
+
+    /// <summary>
+    /// The spatial station, if one has been attached.
+    /// </summary>
+    /// <remarks>
+    /// The tracking service owns the IMU stream, and the spatial
+    /// station needs every sample in order to know where the user is
+    /// looking.  Rather than have two things subscribe to the HID
+    /// device, the station is attached to the tracking service and the
+    /// samples are forwarded to it here.
+    /// </remarks>
+    private Spatial.SpatialStation? _station;
 
     public event Action<TrackingStatus>? StatusChanged;
     public event Action<string>? OnLog;
+
+    /// <summary>Attach the spatial station so it receives IMU samples.</summary>
+    public void AttachStation(Spatial.SpatialStation station) => _station = station;
+
+    /// <summary>
+    /// The live anchor, so the renderer can share it.
+    /// </summary>
+    public RokidDiyStation.Core.Fusion.SpatialAnchor? Anchor => Volatile.Read(ref _anchor);
 
     public TrackingStatus Last => _last;
     public AppSettings Settings => _settings;
@@ -56,6 +77,11 @@ public sealed class TrackingService : IDisposable
         _settings = settings;
         _settingsService = settingsService;
         _smoother = new OrientationSmoother(settings.Smoothing);
+        // The anchor is created up front, not when the device opens, so
+        // that the renderer can share it from the first frame.  The
+        // renderer and the tracker MUST use the same anchor: they are
+        // two views of one world frame.
+        _anchor = new SpatialAnchor(useMagnetometer: settings.UseMagnetometer);
     }
 
     /// <summary>Where diagnostic lines are mirrored to disk so the user
@@ -92,19 +118,73 @@ public sealed class TrackingService : IDisposable
         }
     }
 
+    /// <summary>
+    /// "Pin the panel where I am looking right now."
+    /// </summary>
+    /// <remarks>
+    /// This re-pins the panel at the current gaze WITHOUT moving the
+    /// world origin and WITHOUT disturbing the fusion's calibration.
+    /// It is the fast "put the panel back in front of me" action: the
+    /// panel's world pose is replaced, but the head-pose reference that
+    /// the fusion maintains is left alone, so the gyro bias estimate
+    /// (which takes a couple of seconds to re-establish) survives.
+    ///
+    /// It deliberately does NOT rebase the anchor.  Rebasing rotates
+    /// the anchor frame, and the panel's stored pose is expressed in
+    /// that frame, so rebasing without re-pinning would make the panel
+    /// lurch sideways.  <see cref="Recenter"/> does both, in the right
+    /// order.
+    /// </remarks>
     public void SetAnchorHere()
     {
-        // The anchor is owned by the tracking loop; signal it through
-        // a thread-safe property.
+        // The panel is owned by the spatial station; signal it through
+        // a thread-safe request so the re-pin happens on the tracking
+        // thread (which owns the anchor the panel is read from).
         _pendingAnchorReset = AnchorRequest.Set;
     }
 
+    /// <summary>
+    /// Throw away the fusion's state and forget the panel.
+    /// </summary>
+    /// <remarks>
+    /// This is the "something is wrong, start over" action.  The gyro
+    /// bias estimate and the position integrator are discarded, so the
+    /// filter has to re-calibrate (about a second of stillness), and
+    /// the panel is cleared because its world pose was expressed
+    /// against a reference that no longer exists.
+    /// </remarks>
     public void ResetAnchor()
     {
         _pendingAnchorReset = AnchorRequest.Reset;
     }
 
-    private enum AnchorRequest { None, Set, Reset }
+    /// <summary>
+    /// The "I am looking straight ahead now" button.
+    /// </summary>
+    /// <remarks>
+    /// This does two things: it moves the world origin to the current
+    /// head pose, and it re-pins the spatial panel there.  Both have to
+    /// happen together — re-pinning without moving the origin would
+    /// leave the panel's stored pose inconsistent with the head pose
+    /// the user re-anchored to, and moving the origin without
+    /// re-pinning would rotate the anchor frame out from under the
+    /// panel and make it lurch.
+    ///
+    /// This is the drift-recovery action.  A gyroscope has no absolute
+    /// heading, so the panel inevitably creeps away from where the user
+    /// is looking; rebasing the origin resets that reference, and
+    /// re-pinning puts the panel back in front of them.
+    ///
+    /// The anchor mutation happens on the tracking thread (which owns
+    /// the anchor); the panel re-pinning is handed to the spatial
+    /// station, which owns the panel and does it on its pump thread.
+    /// </remarks>
+    public void Recenter()
+    {
+        _pendingAnchorReset = AnchorRequest.Recenter;
+    }
+
+    private enum AnchorRequest { None, Set, Reset, Recenter }
     private AnchorRequest _pendingAnchorReset;
     private readonly object _anchorReqLock = new();
     private AnchorRequest ConsumeAnchorRequest()
@@ -141,7 +221,13 @@ public sealed class TrackingService : IDisposable
 
         Publish(new TrackingStatus(TrackingState.Streaming, $"Streaming {device.ProductName} (0x{device.VendorId:X4}:0x{device.ProductId:X4})", 0, false, false, Vector3.Zero, (0, 0, 0)));
 
-        var anchor = new SpatialAnchor(useMagnetometer: _settings.UseMagnetometer);
+        // Reuse the shared anchor so the renderer keeps seeing the same
+        // world frame across a device reconnect.  A reconnect means the
+        // IMU stream restarted, so the pose has to be re-established
+        // from scratch.
+        var anchor = _anchor ??= new SpatialAnchor(useMagnetometer: _settings.UseMagnetometer);
+        Volatile.Write(ref _anchor, anchor);
+        anchor.Reset();
         var emitter = new FreePieEmitter(new FreePieEmitterOptions(
             TargetHost: _settings.UdpHost,
             TargetPort: _settings.UdpPort,
@@ -169,8 +255,31 @@ public sealed class TrackingService : IDisposable
             while (!token.IsCancellationRequested)
             {
                 var req = ConsumeAnchorRequest();
-                if (req == AnchorRequest.Set) anchor.SetAnchorHere();
-                else if (req == AnchorRequest.Reset) anchor.Reset();
+                if (req == AnchorRequest.Set)
+                {
+                    // Re-pin the panel at the current gaze, but leave
+                    // the anchor's frame and the fusion's calibration
+                    // alone.
+                    _station?.AnchorHere();
+                }
+                else if (req == AnchorRequest.Reset)
+                {
+                    // Throw the fusion's state away and forget the
+                    // panel: the world origin is gone, so the panel's
+                    // stored pose is meaningless.
+                    anchor.Reset();
+                    _station?.ForgetPanel();
+                }
+                else if (req == AnchorRequest.Recenter)
+                {
+                    // Move the world origin AND re-pin the panel, in
+                    // that order: the panel's pose is expressed in the
+                    // anchor frame, so the frame has to be rebased
+                    // before the panel is pinned into it.  Doing it in
+                    // the other order would leave the panel one frame
+                    // stale — a visible lurch.
+                    _station?.Recenter();
+                }
 
                 if (!device.TryRead(timeoutMs: 100, out var report)) continue;
                 var result = PacketParser.Parse(report);
@@ -188,6 +297,7 @@ public sealed class TrackingService : IDisposable
                 accCount++;
                 lastSampleForDebug = sample;
                 anchor.Update(sample);
+                _station?.FeedImu(sample);
                 var (q, p) = _smoother.Update(anchor.HeadOrientation, anchor.HeadPosition);
                 emitter.Send(q, p);
                 samplesThisSecond++;
@@ -220,7 +330,11 @@ public sealed class TrackingService : IDisposable
                         $"gyro=({avgG.X:F4},{avgG.Y:F4},{avgG.Z:F4})|g|={avgGyro:F3} rad/s  " +
                         $"acc=({avgA.X:F2},{avgA.Y:F2},{avgA.Z:F2})|a|={avgAccel:F2} m/s²  " +
                         $"mag=({avgM.X:F1},{avgM.Y:F1},{avgM.Z:F1})  " +
-                        $"eul=({dr*180/MathF.PI:F1}, {dp*180/MathF.PI:F1}, {dy*180/MathF.PI:F1})  " +
+                        // ToEulerZYX already returns DEGREES.  Multiplying
+                        // by 180/pi a second time turned a 10-degree
+                        // pitch into 1745 degrees and fired the gimbal
+                        // -lock warning on every single sample.
+                        $"eul=({dr:F1}, {dp:F1}, {dy:F1})  " +
                         $"cal={anchor.IsGyroCalibrated} stat={anchor.IsStationary}");
                     // If |pitch| is near ±90° we're in the gimbal-lock
                     // neighbourhood and the Euler decomposition is
@@ -228,9 +342,9 @@ public sealed class TrackingService : IDisposable
                     // angle jumps).  Surface that as a warning so the
                     // user knows to set an anchor at a more
                     // head-natural pitch (around 0..30°).
-                    if (MathF.Abs(dp) > 1.396f /* 80° */)
+                    if (MathF.Abs(dp) > 80f)
                     {
-                        AppendLogSafe($"WARN: pitch={dp * 180 / MathF.PI:F1}° near gimbal lock — set anchor or use quaternion output.");
+                        AppendLogSafe($"WARN: pitch={dp:F1}° near gimbal lock — set anchor or use quaternion output.");
                     }
                     accGyroMag = accAccelMag = accMagMag = 0;
                     accGyroSum = accAccelSum = accMagSum = Vector3.Zero;
@@ -251,7 +365,10 @@ public sealed class TrackingService : IDisposable
                         anchor.IsGyroCalibrated,
                         anchor.IsStationary,
                         p,
-                        (r * 180 / Math.PI, pi * 180 / Math.PI, ya * 180 / Math.PI)));
+                        // ToEulerZYX already returns degrees, and the
+                        // status record is documented in degrees, so
+                        // there is no conversion here.
+                        (r, pi, ya)));
                 }
                 if ((now - lastTick).TotalSeconds >= 1.0)
                 {

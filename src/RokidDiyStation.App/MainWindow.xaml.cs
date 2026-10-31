@@ -10,6 +10,7 @@ public partial class MainWindow : Window
     private readonly SettingsService _settingsService;
     private readonly AutostartService _autostart;
     private readonly TrackingService _tracking;
+    private Spatial.SpatialStation? _station;
     private bool _quitting;
 
     public MainWindow(SettingsService settingsService, AutostartService autostart, TrackingService tracking)
@@ -22,9 +23,59 @@ public partial class MainWindow : Window
         Closing += OnClosing;
     }
 
+    /// <summary>
+    /// Attach the spatial station and wire its live readouts.
+    /// </summary>
+    public void AttachStation(Spatial.SpatialStation station)
+    {
+        _station = station;
+        station.OnStatus += (_, msg) => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            PanelText.Text = $"panel  {msg}";
+        }));
+        station.OnFrameRate += fps => Dispatcher.BeginInvoke(new Action(() =>
+        {
+            PanelText.Text = $"panel  {station.Message}  ({fps:0} fps)";
+        }));
+        RefreshWindowList();
+    }
+
+    /// <summary>Rebuild the list of capturable windows.</summary>
+    public void RefreshWindowList()
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(RefreshWindowList)); return; }
+        var selected = WindowPickerBox.SelectedItem as Spatial.WindowEntry;
+        WindowPickerBox.Items.Clear();
+        foreach (var w in Spatial.WindowPicker.List())
+            WindowPickerBox.Items.Add(w);
+        if (selected is not null && WindowPickerBox.Items.Contains(selected))
+            WindowPickerBox.SelectedItem = selected;
+    }
+
+    private void OnWindowSelected(object sender, SelectionChangedEventArgs e)
+    {
+        // Selecting a window is not the same as pinning it; the user
+        // still has to press the button.  This keeps the accidental
+        // click from hijacking the glasses.
+    }
+
+    private void OnPinClick(object sender, RoutedEventArgs e)
+    {
+        if (_station is null) return;
+        if (WindowPickerBox.SelectedItem is not Spatial.WindowEntry w) return;
+        _station.QueueCapture(w.Handle);
+        // Place the panel where the user is looking now — before the
+        // capture has even produced its first frame.
+        _station.AnchorHere();
+        AppendLog($"Pinning '{w.Title}' (0x{w.Handle.ToInt64():X}).");
+    }
+
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         BindFromSettings();
+        LazyFollowSlider.ValueChanged += (_, _) => UpdateSpatialLabels();
+        PanelDistanceSlider.ValueChanged += (_, _) => UpdateSpatialLabels();
+        NeckScaleSlider.ValueChanged += (_, _) => UpdateSpatialLabels();
     }
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
@@ -56,7 +107,23 @@ public partial class MainWindow : Window
         RawPosBox.IsChecked = true;
         AutostartBox.IsChecked = s.Autostart;
         StartMinBox.IsChecked  = s.StartMinimised;
+        LazyFollowSlider.Value = s.LazyFollowDeadzoneDegrees;
+        PanelDistanceSlider.Value = s.PanelDistanceMetres;
+        NeckScaleSlider.Value = s.NeckModelScale;
+        UpdateSpatialLabels();
         AppendLog($"Settings loaded from {_settingsService.FilePath}");
+    }
+
+    /// <summary>Refresh the text readouts next to the spatial sliders.</summary>
+    private void UpdateSpatialLabels()
+    {
+        LazyFollowLabel.Text = LazyFollowSlider.Value <= 0.01
+            ? "off"
+            : $"±{LazyFollowSlider.Value:0}°";
+        PanelDistanceLabel.Text = $"{PanelDistanceSlider.Value:0.0} m";
+        NeckScaleLabel.Text = NeckScaleSlider.Value <= 0.01
+            ? "none"
+            : $"{NeckScaleSlider.Value * 100:0}%";
     }
 
     public void UpdateStatus(TrackingStatus s)
@@ -96,22 +163,50 @@ public partial class MainWindow : Window
         return deg;
     }
 
+    /// <summary>
+    /// The "I am looking straight ahead now" action.
+    /// </summary>
+    /// <remarks>
+    /// This moves the world origin to the current head pose and
+    /// re-pins the spatial panel there.  It is the drift-recovery
+    /// action: a gyroscope has no absolute heading, so the panel
+    /// inevitably creeps away from where the user is looking, and this
+    /// is the one-key way to put it back.
+    ///
+    /// The anchor mutation happens on the tracking thread; the panel
+    /// re-pinning is handed to the station.
+    /// </remarks>
     public void Recenter()
     {
-        AppendLog("Recentred (placeholder — consumers re-derive the neutral orientation).");
+        _tracking.Recenter();
+        AppendLog("Recentred — the panel is now straight ahead of you.");
     }
 
+    /// <summary>
+    /// Pin the panel where the user is currently looking.
+    /// </summary>
+    /// <remarks>
+    /// This re-pins the panel at the current gaze without disturbing
+    /// the fusion's calibration or the world origin.  It is the fast
+    /// "the panel drifted, put it back in front of me" action, and it
+    /// is the one to reach for when the panel has crept off to the
+    /// side but the head pose is still trustworthy.
+    ///
+    /// <see cref="Recenter"/> is the heavier action: it rebases the
+    /// world origin as well, which is what you want after a long
+    /// session's worth of yaw drift.
+    /// </remarks>
     private void OnSetAnchorClick(object sender, RoutedEventArgs e)
     {
         // The window has a _tracking reference; call it directly.
         _tracking.SetAnchorHere();
-        AppendLog("Set anchor here.");
+        AppendLog("Panel pinned at your current gaze.");
     }
 
     private void OnResetAnchorClick(object sender, RoutedEventArgs e)
     {
         _tracking.ResetAnchor();
-        AppendLog("Anchor reset.");
+        AppendLog("Panel forgotten. Pin a window again to bring it back.");
     }
 
     private void OnRecenterClick(object sender, RoutedEventArgs e)
@@ -140,8 +235,23 @@ public partial class MainWindow : Window
             UseMagnetometer = MagBox.IsChecked == true,
             Autostart = AutostartBox.IsChecked == true,
             StartMinimised = StartMinBox.IsChecked == true,
+            LazyFollowDeadzoneDegrees = LazyFollowSlider.Value,
+            PanelDistanceMetres = PanelDistanceSlider.Value,
+            NeckModelScale = NeckScaleSlider.Value,
         };
         _settingsService.Update(next);
+        // Apply the spatial options live, so the user sees the effect
+        // of the comfort cone / distance / neck-scale changes without
+        // having to re-pin or restart.
+        _station?.ApplyAnchorOptions(new Core.Spatial.SpatialAnchorOptions
+        {
+            UseMagnetometer = next.UseMagnetometer,
+            LazyFollowDeadzoneDegrees = (float)Math.Clamp(next.LazyFollowDeadzoneDegrees, 0.0, 45.0),
+            LazyFollowRatePerSecond = (float)Math.Clamp(next.LazyFollowRatePerSecond, 0.0, 10.0),
+            NeckModelScale = (float)Math.Clamp(next.NeckModelScale, 0.0, 1.0),
+            PanelDistance = (float)Math.Clamp(next.PanelDistanceMetres, 0.3, 10.0),
+            PanelFovFraction = (float)Math.Clamp(next.PanelFovFraction, 0.1, 1.0),
+        });
         try
         {
             var exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName
@@ -160,11 +270,24 @@ public partial class MainWindow : Window
 
     public void AppendLog(string line)
     {
+        // The station and the renderer log from background threads, and
+        // they can fire before the dispatcher starts pumping.  A
+        // blocking Invoke() would hang the calling thread in that
+        // case, so we use a fire-and-forget BeginInvoke and mirror
+        // every line to the log file regardless.
+        WriteLogFile(line);
+
         if (!Dispatcher.CheckAccess())
         {
-            Dispatcher.Invoke(() => AppendLog(line));
+            try { Dispatcher.BeginInvoke(new Action(() => AppendToList(line))); }
+            catch { /* the dispatcher is shutting down */ }
             return;
         }
+        AppendToList(line);
+    }
+
+    private void AppendToList(string line)
+    {
         var stamp = DateTime.Now.ToString("HH:mm:ss");
         LogList.Items.Add($"[{stamp}] {line}");
         if (LogList.Items.Count > 200)
@@ -175,9 +298,10 @@ public partial class MainWindow : Window
         {
             LogList.ScrollIntoView(LogList.Items[^1]);
         }
-        // Mirror every UI log line to the diagnostic file too, so the
-        // user has a complete transcript in Notepad (settings save,
-        // hotkey failures, status transitions, IMU diagnostic, …).
+    }
+
+    private static void WriteLogFile(string line)
+    {
         try
         {
             var path = TrackingService.DiagnosticLogPath;

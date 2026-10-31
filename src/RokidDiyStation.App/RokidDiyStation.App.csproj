@@ -2,24 +2,63 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <!--
+      26100, not 19041: the Windows.Graphics.Capture session API we need
+      (IsBorderRequired, MinUpdateInterval) only exists in the 26100
+      projection.  On an older runtime we guard the property access at
+      runtime instead of refusing to start.
+    -->
+    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <RootNamespace>RokidDiyStation.App</RootNamespace>
     <AssemblyName>RokidDiyStation</AssemblyName>
     <StartupObject>RokidDiyStation.App.Program</StartupObject>
+    <!-- The vertex buffer upload writes straight into the mapped D3D
+         memory, which needs raw pointers. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Generate the tray icon before every build.  -->
     <PreBuildEvent>powershell -NoProfile -ExecutionPolicy Bypass -File "$(MSBuildProjectDirectory)\generate-icon.ps1"</PreBuildEvent>
+    <!-- Compile the HLSL shaders to DXBC and embed them.  -->
+    <PreBuildEvent>powershell -NoProfile -ExecutionPolicy Bypass -File "$(MSBuildProjectDirectory)\build-shaders.ps1" -Configuration "$(Configuration)"</PreBuildEvent>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="H.NotifyIcon.Wpf" Version="2.0.124" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The compiled shaders, loaded at runtime as embedded resources.
+
+      NB: neither the file extension nor the logical name may end in
+      ".ps".  MSBuild treats an extension that looks like a culture code
+      ("ps" = Pashto) as a satellite assembly and quietly moves the
+      resource out of the main assembly into a satellite DLL.  The
+      shader then is not found at runtime.
+    -->
+    <EmbeddedResource Include="obj\Shaders\$(Configuration)\Panel.vertex.cso"
+                      LogicalName="RokidDiyStation.App.Spatial.Shaders.PanelVertex.cso" />
+    <EmbeddedResource Include="obj\Shaders\$(Configuration)\Panel.pixel.cso"
+                      LogicalName="RokidDiyStation.App.Spatial.Shaders.PanelPixel.cso" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\RokidDiyStation.Core\RokidDiyStation.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The display guard's decision logic is internal, because it is an
+      implementation detail of the Win32 plumbing.  The test project
+      needs to reach it, so it is made visible to that assembly only.
+    -->
+    <InternalsVisibleTo Include="RokidDiyStation.App.Tests" />
   </ItemGroup>
 
 </Project>

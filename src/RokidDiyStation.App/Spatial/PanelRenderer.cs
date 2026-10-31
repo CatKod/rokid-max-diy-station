@@ -1,0 +1,1133 @@
+// SPDX-License-Identifier: MIT
+//
+// The native render window and its Direct3D 11 pipeline.
+//
+// This is deliberately NOT a WPF window.  WPF's render thread
+// (wpfgfx) synchronises to the primary display's refresh rate, and
+// embedding a D3D surface inside WPF (HwndHost, D3DImage) subjects
+// it to that thread's cadence - which would clamp the Rokid Max's
+// panel down to 60 Hz and add one to two frames of buffering.  So we
+// create a plain top-level Win32 window and drive it from our own
+// thread with a flip-model swapchain.
+//
+// The window is:
+//   WS_POPUP | WS_VISIBLE                          - borderless, no caption
+//   WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+//                                                - always on top, not in
+//                                                  the taskbar or Alt+Tab,
+//                                                  and never steals focus
+//
+// Positioning it exactly on the Rokid's monitor bounds lets DWM use
+// Independent Flip, which is the lowest-latency presentation path.
+//
+// Threading: the render thread owns the D3D objects exclusively.  The
+// tracking thread writes the head pose into the anchor service; the
+// render thread reads the latest snapshot.  No locks on the hot path.
+//
+// See .research/d2/findings.md for the measurements and the reasoning
+// behind the choices made here.
+using System.IO;
+using System.Numerics;
+using System.Runtime.InteropServices;
+using RokidDiyStation.Core.Spatial;
+using Vortice.Direct3D;
+using Vortice.Direct3D11;
+using Vortice.DXGI;
+
+namespace RokidDiyStation.App.Spatial;
+
+/// <summary>
+/// Owns the render window, the D3D device and the swapchain, and draws
+/// the pinned panel into them.
+/// </summary>
+public sealed class PanelRenderer : IDisposable
+{
+    private const int WS_POPUP = unchecked((int)0x80000000);
+    private const int WS_VISIBLE = 0x10000000;
+    private const int WS_EX_TOPMOST = 0x00000008;
+    private const int WS_EX_TOOLWINDOW = 0x00000080;
+    private const int WS_EX_NOACTIVATE = 0x08000000;
+
+    /// <summary>
+    /// Let mouse clicks pass straight through to whatever is behind.
+    /// </summary>
+    /// <remarks>
+    /// The panel covers the whole glasses' display, and the glasses'
+    /// display is a secondary monitor — the user is not looking at it
+    /// with a mouse.  Without this, a stray click over the glasses'
+    /// screen would land on our window instead of on the app behind
+    /// it, and (with WS_EX_NOACTIVATE) the click would be swallowed
+    /// entirely.
+    /// </remarks>
+    private const int WS_EX_TRANSPARENT = 0x00000020;
+
+    private const int SWP_NOACTIVATE = 0x0010;
+    private const int SWP_SHOWWINDOW = 0x0040;
+
+    /// <summary>
+    /// Keep this window out of every OS capture surface.
+    /// </summary>
+    /// <remarks>
+    /// If the user ever puts Windows into "clone" display mode, the
+    /// glasses' display mirrors the primary one, and a capture of the
+    /// primary display would then include our own panel - an optical
+    /// feedback loop that stalls the GPU.  Excluding the window
+    /// outright removes the possibility.
+    /// </remarks>
+    private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+
+    private const string WindowClassName = "RokidDiyStationPanel";
+
+    private static readonly IntPtr HWND_TOPMOST = new(-1);
+
+    private readonly object _lock = new();
+    private IntPtr _hwnd;
+    private Thread? _thread;
+    private CancellationTokenSource? _cts;
+
+    private ID3D11Device? _device;
+    private ID3D11DeviceContext? _context;
+    private IDXGISwapChain? _swapChain;
+    private IDXGISwapChain2? _swapChain2;
+    private ID3D11RenderTargetView? _backBuffer;
+    private ID3D11DepthStencilView? _depthView;
+    private ID3D11Buffer? _vertexBuffer;
+    private ID3D11Buffer? _constantBuffer;
+    private ID3D11InputLayout? _inputLayout;
+    private ID3D11VertexShader? _vertexShader;
+    private ID3D11PixelShader? _pixelShader;
+    private ID3D11SamplerState? _sampler;
+    private ID3D11RasterizerState? _rasterizer;
+
+    private uint _backBufferWidth;
+    private uint _backBufferHeight;
+    private WaitHandle? _frameLatencyWaitable;
+
+    private volatile bool _running;
+    private int _diagFrames;
+    private DisplayTarget? _display;
+    private SpatialAnchorService? _anchor;
+    private volatile ID3D11ShaderResourceView? _panelSrv;
+
+    /// <summary>Raised on the render thread when a fatal error occurs.</summary>
+    public event Action<string>? OnError;
+
+    /// <summary>Raised on the render thread with the measured frame rate.</summary>
+    public event Action<double>? OnFrameRate;
+
+    /// <summary>
+    /// The texture to display on the panel, set from outside the render
+    /// thread.  Ownership stays with the caller.
+    /// </summary>
+    public ID3D11ShaderResourceView? PanelTexture
+    {
+        get => _panelSrv;
+        set => _panelSrv = value;
+    }
+
+    /// <summary>True once the D3D pipeline is up.</summary>
+    public bool IsReady => _device is not null;
+
+    /// <summary>The D3D device, so the capture pipeline can share it.</summary>
+    public ID3D11Device? Device => _device;
+
+    /// <summary>The render window's handle, once it exists.</summary>
+    public IntPtr WindowHandle => _hwnd;
+
+    /// <summary>
+    /// Ask the render thread to measure how much of the panel is lit,
+    /// and return the result.
+    /// </summary>
+    /// <remarks>
+    /// The measurement has to happen ON the render thread, between the
+    /// draw and the present.  A flip-model swapchain's back buffer
+    /// contents are undefined once <c>Present</c> has been called — the
+    /// driver is free to discard them — so reading the buffer from
+    /// another thread after the fact returns garbage (measured: 0 %
+    /// coverage on a perfectly good frame).
+    ///
+    /// The render thread therefore does the copy into a staging texture
+    /// while it still owns the back buffer, and this method just waits
+    /// for the answer.
+    /// </remarks>
+    public float MeasurePanelCoverage()
+    {
+        // Wait for the render thread to answer the request we are
+        // about to make.  The generation counter tells us which
+        // answer we are getting: the render thread bumps it once per
+        // completed measurement, so a stale result from an earlier
+        // request cannot be mistaken for this one.
+        var startGeneration = _coverageGeneration;
+        _coverageRequested = true;
+
+        var deadline = Environment.TickCount64 + 3000;
+        while (_coverageGeneration == startGeneration && Environment.TickCount64 < deadline)
+        {
+            Thread.Sleep(5);
+        }
+
+        if (_coverageGeneration == startGeneration)
+        {
+            // The render thread never answered — it is not running, or
+            // it is wedged.
+            return -1f;
+        }
+
+        return _coverageResult;
+    }
+
+    /// <summary>The most recent coverage fraction, or -1 if never measured.</summary>
+    private volatile float _coverageResult = -1f;
+
+    /// <summary>Set by the caller to request a measurement.</summary>
+    private volatile bool _coverageRequested;
+
+    /// <summary>Bumped by the render thread once per completed measurement.</summary>
+    private volatile int _coverageGeneration;
+
+    public void Start(SpatialAnchorService anchor, DisplayTarget display)
+    {
+        lock (_lock)
+        {
+            if (_thread is { IsAlive: true }) return;
+            _anchor = anchor;
+            _display = display;
+            _cts = new CancellationTokenSource();
+            _running = true;
+            _thread = new Thread(RenderLoop)
+            {
+                IsBackground = true,
+                Name = "PanelRenderer",
+                Priority = ThreadPriority.Highest,
+            };
+            _thread.Start();
+        }
+    }
+
+    public void Stop()
+    {
+        lock (_lock)
+        {
+            _running = false;
+            _cts?.Cancel();
+        }
+    }
+
+    /// <summary>Re-position the window when the monitor layout changes.</summary>
+    public void Reposition(DisplayTarget display)
+    {
+        lock (_lock) _display = display;
+        if (_hwnd != IntPtr.Zero) PositionWindow(_hwnd, display);
+    }
+
+    private void RenderLoop()
+    {
+        var token = _cts!.Token;
+        try
+        {
+            CreateWindowAndDevice();
+            if (!token.IsCancellationRequested) FrameLoop(token);
+        }
+        catch (Exception ex)
+        {
+            _running = false;
+            OnError?.Invoke($"Renderer failed: {ex.Message}");
+        }
+        finally
+        {
+            Cleanup();
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Window creation
+    // -----------------------------------------------------------------
+
+    private void CreateWindowAndDevice()
+    {
+        var display = _display ?? throw new InvalidOperationException("No display selected.");
+
+        // Register the window class on the render thread, so the window
+        // belongs to it.  Without a registered class CreateWindowEx
+        // fails with a bogus error code.
+        //
+        // The class gets a custom window procedure so the renderer can
+        // see WM_DISPLAYCHANGE and WM_DEVICECHANGE.  Those messages
+        // have to be handled INSIDE the message handler: by the time
+        // DWM has finished relaying out the desktop after a display
+        // disconnect, it has already moved our fullscreen window onto
+        // the primary display.  See DisplayGuard for the details.
+        RegisterWindowClass();
+
+        // Create the window on the render thread, so it belongs to it.
+        _hwnd = NativeMethods.CreateWindowEx(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            WindowClassName,
+            "Rokid DiyStation Panel",
+            WS_POPUP | WS_VISIBLE,
+            display.Bounds.X, display.Bounds.Y,
+            display.Bounds.Width, display.Bounds.Height,
+            IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+
+        if (_hwnd == IntPtr.Zero)
+            throw new InvalidOperationException($"CreateWindowEx failed (error {Marshal.GetLastWin32Error()}).");
+
+        // Keep the panel out of screen captures, so a clone-mode display
+        // arrangement cannot feed our own output back into itself.
+        NativeMethods.SetWindowDisplayAffinity(_hwnd, WDA_EXCLUDEFROMCAPTURE);
+
+        PositionWindow(_hwnd, display);
+
+        // Keep the glasses' display awake while we are rendering.
+        NativeMethods.SetThreadExecutionState(
+            NativeMethods.ES_CONTINUOUS
+            | NativeMethods.ES_DISPLAY_REQUIRED
+            | NativeMethods.ES_SYSTEM_REQUIRED);
+
+        // --- Device ---------------------------------------------------
+        // BgraSupport is required so that the same device can be
+        // wrapped in a WinRT IDirect3DDevice, which is what the
+        // Windows.Graphics.Capture frame pool needs.
+        //
+        // The device must also live on the adapter that DRIVES the
+        // glasses' display.  On a hybrid-graphics laptop the USB-C
+        // port is usually wired to the iGPU while the dGPU is faster;
+        // creating the device on the wrong adapter forces a
+        // cross-adapter blit every frame and adds 8-16 ms.
+        _device = CreateDeviceForOutput(display);
+
+        if (_device is null)
+            throw new InvalidOperationException("D3D11CreateDevice returned no device.");
+
+        _context = _device.ImmediateContext;
+
+        // --- Swapchain ------------------------------------------------
+        using var factory = CreateFactory();
+
+        var swapChainDesc = new SwapChainDescription1
+        {
+            Width = (uint)display.Bounds.Width,
+            Height = (uint)display.Bounds.Height,
+            Format = Format.B8G8R8A8_UNorm,
+            SampleDescription = new SampleDescription { Count = 1 },
+            BufferUsage = Usage.RenderTargetOutput,
+            BufferCount = 2,
+            Scaling = Scaling.Stretch,
+            SwapEffect = SwapEffect.FlipDiscard,
+            AlphaMode = AlphaMode.Ignore,
+            Flags = SwapChainFlags.FrameLatencyWaitableObject,
+        };
+
+        _swapChain = factory.CreateSwapChainForHwnd(_device, _hwnd, swapChainDesc, null, null);
+
+        // The waitable-object swapchain lives on IDXGISwapChain2.
+        _swapChain2 = _swapChain.QueryInterface<IDXGISwapChain2>();
+        _swapChain2.MaximumFrameLatency = 1;
+
+        var waitable = _swapChain2.FrameLatencyWaitableObject;
+        if (waitable != IntPtr.Zero)
+        {
+            // The swapchain's waitable object is a real Win32 event
+            // handle, so we can wait on it directly.
+            var handle = new Microsoft.Win32.SafeHandles.SafeWaitHandle(waitable, false);
+            _frameLatencyWaitable = new AutoResetEvent(false);
+            _frameLatencyWaitable.SafeWaitHandle = handle;
+        }
+
+        CreateBackBuffer();
+        CreatePipeline();
+    }
+
+    private static void RegisterWindowClass()
+    {
+        // The custom window procedure is what lets the renderer see
+        // WM_DISPLAYCHANGE and WM_DEVICECHANGE.  The delegate has to
+        // stay alive for as long as the window class does, because the
+        // class holds a raw pointer to it — hence the static field.
+        _windowProc ??= PanelWindowProc;
+        NativeMethods.RegisterClass(WindowClassName, _windowProc);
+    }
+
+    /// <summary>
+    /// Keeps the window procedure delegate alive.
+    /// </summary>
+    /// <remarks>
+    /// The window class stores a raw function pointer to the delegate.
+    /// If the delegate were collected, that pointer would dangle and
+    /// the next message dispatch would jump into freed memory.  A
+    /// static reference is the simplest way to keep it alive for the
+    /// lifetime of the process.
+    /// </remarks>
+    private static NativeMethods.WindowProc? _windowProc;
+
+    /// <summary>
+    /// The panel window's message handler.
+    /// </summary>
+    /// <remarks>
+    /// Two things matter here, and both are about not stealing the
+    /// user's attention:
+    ///
+    ///  * WM_MOUSEACTIVATE — the user clicks on the glasses' display.
+    ///   Returning MA_NOACTIVATE stops Windows from giving our window
+    ///   the focus, which would pull the user out of whatever they
+    ///   were typing in.
+    ///
+    ///  * WM_DISPLAYCHANGE / WM_DEVICECHANGE — the glasses were
+    ///   unplugged or re-plugged.  The check has to happen HERE,
+    ///   synchronously, because DWM relocates windows on a vanished
+    ///   display to (0, 0) on the primary display as part of handling
+    ///   this message.  By the time a timer or a poll noticed, our
+    ///   borderless 1920x1080 topmost window would already be
+    ///   covering the user's laptop screen.
+    /// </remarks>
+    private static IntPtr PanelWindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
+    {
+        switch (msg)
+        {
+            case NativeMethods.WM_MOUSEACTIVATE:
+                return NativeMethods.MA_NOACTIVATE;
+
+            case NativeMethods.WM_DISPLAYCHANGE:
+                // The display topology changed.  This is the message
+                // DWM uses to relocate windows off a vanished
+                // display, so the window has to be hidden NOW —
+                // synchronously, inside the handler — or it ends up
+                // covering the user's primary display.
+                //
+                // The follow-up check then decides whether the glasses
+                // are still there and re-shows the window if they are.
+                NativeMethods.ShowWindow(hwnd, NativeMethods.SW_HIDE);
+                ThreadPool.QueueUserWorkItem(_ => DisplayChanged?.Invoke());
+                return IntPtr.Zero;
+
+            case NativeMethods.WM_DEVICECHANGE:
+                // A device was plugged in or removed.  This fires for
+                // every USB event — including the IMU's own — so it
+                // must NOT hide the window; a hide here would make the
+                // panel flicker every time a device is touched.
+                //
+                // It is still worth a check, because the glasses'
+                // re-enumeration usually comes with a display change
+                // shortly afterwards.
+                ThreadPool.QueueUserWorkItem(_ => DisplayChanged?.Invoke());
+                return IntPtr.Zero;
+        }
+
+        return NativeMethods.DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+
+    /// <summary>
+    /// Raised when the display configuration changed.  The subscriber
+    /// is expected to re-check where the panel should be and re-show or
+    /// re-hide it.
+    /// </summary>
+    /// <remarks>
+    /// It is static because the window procedure is static: the
+    /// window class holds a raw pointer to the delegate, and there is
+    /// only ever one panel window in the process.
+    /// </remarks>
+    public static event Action? DisplayChanged;
+
+    /// <summary>
+    /// Create the D3D device on the adapter that drives the given
+    /// display, falling back to the default hardware adapter.
+    /// </summary>
+    private static ID3D11Device? CreateDeviceForOutput(DisplayTarget display)
+    {
+        try
+        {
+            using var factory = CreateFactory();
+
+            for (uint i = 0; ; i++)
+            {
+                var enumResult = factory.EnumAdapters(i, out var adapter);
+                if (enumResult.Failure) break;
+                if (adapter is null) break;
+
+                using (adapter)
+                {
+                    for (uint j = 0; ; j++)
+                    {
+                        var outputResult = adapter.EnumOutputs(j, out var output);
+                        if (outputResult.Failure) break;
+                        if (output is null) break;
+
+                        using (output)
+                        {
+                            var desc = output.Description;
+                            // The output's device name is the GDI display
+                            // name, e.g. "\\.\DISPLAY5".
+                            if (!string.Equals(desc.DeviceName, display.DevicePath, StringComparison.OrdinalIgnoreCase))
+                                continue;
+
+                            var hr = D3D11.D3D11CreateDevice(
+                                adapter,
+                                DriverType.Unknown,
+                                DeviceCreationFlags.BgraSupport,
+                                null,
+                                out var device);
+                            if (hr.Failure) continue;
+                            return device;
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Fall through to the default adapter below.
+        }
+
+        // The overload that takes no adapter returns the device
+        // directly; a null device means creation failed.
+        return D3D11.D3D11CreateDevice(
+            DriverType.Hardware,
+            DeviceCreationFlags.BgraSupport,
+            null);
+    }
+
+    private static IDXGIFactory2 CreateFactory()
+    {
+        var factory = DXGI.CreateDXGIFactory2<IDXGIFactory2>(false);
+        return factory;
+    }
+
+    private void PositionWindow(IntPtr hwnd, DisplayTarget display)
+    {
+        NativeMethods.SetWindowPos(
+            hwnd, HWND_TOPMOST,
+            display.Bounds.X, display.Bounds.Y,
+            display.Bounds.Width, display.Bounds.Height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    private void CreateBackBuffer()
+    {
+        if (_swapChain is null) return;
+
+        var buffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
+        _backBufferWidth = buffer.Description.Width;
+        _backBufferHeight = buffer.Description.Height;
+
+        _backBuffer = _device!.CreateRenderTargetView(buffer, null);
+        buffer.Dispose();
+
+        // A depth buffer is not strictly needed (the panel is the only
+        // geometry), but it keeps the pipeline well-formed and costs
+        // little.
+        var depthDesc = new Texture2DDescription
+        {
+            Width = _backBufferWidth,
+            Height = _backBufferHeight,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.D16_UNorm,
+            SampleDescription = new SampleDescription { Count = 1 },
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.DepthStencil,
+            CPUAccessFlags = CpuAccessFlags.None,
+            MiscFlags = ResourceOptionFlags.None,
+        };
+        using var depthTexture = _device.CreateTexture2D(depthDesc);
+        _depthView = _device.CreateDepthStencilView(depthTexture, null);
+    }
+
+    // -----------------------------------------------------------------
+    // Pipeline
+    // -----------------------------------------------------------------
+
+    private void CreatePipeline()
+    {
+        var vsBytes = LoadShader("RokidDiyStation.App.Spatial.Shaders.PanelVertex.cso");
+        var psBytes = LoadShader("RokidDiyStation.App.Spatial.Shaders.PanelPixel.cso");
+
+        _vertexShader = _device!.CreateVertexShader(vsBytes);
+        _pixelShader = _device.CreatePixelShader(psBytes);
+
+        var inputElements = new[]
+        {
+            new InputElementDescription
+            {
+                SemanticName = "POSITION",
+                SemanticIndex = 0,
+                Format = Format.R32G32B32_Float,
+                Slot = 0,
+                AlignedByteOffset = 0,
+                Classification = InputClassification.PerVertexData,
+                InstanceDataStepRate = 0,
+            },
+            new InputElementDescription
+            {
+                SemanticName = "TEXCOORD",
+                SemanticIndex = 0,
+                Format = Format.R32G32_Float,
+                Slot = 0,
+                AlignedByteOffset = 12,
+                Classification = InputClassification.PerVertexData,
+                InstanceDataStepRate = 0,
+            },
+        };
+
+        _inputLayout = _device.CreateInputLayout(inputElements, vsBytes);
+
+        // Constant buffer: 64 bytes of matrix + 16 bytes of UV transform.
+        var cbDesc = new BufferDescription
+        {
+            ByteWidth = 80,
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.ConstantBuffer,
+            CPUAccessFlags = CpuAccessFlags.None,
+            MiscFlags = ResourceOptionFlags.None,
+            StructureByteStride = 0,
+        };
+        _constantBuffer = _device.CreateBuffer(cbDesc, IntPtr.Zero);
+
+        // Vertex buffer: 6 vertices (two triangles), each 20 bytes.
+        var vbDesc = new BufferDescription
+        {
+            ByteWidth = 6 * 20,
+            Usage = ResourceUsage.Dynamic,
+            BindFlags = BindFlags.VertexBuffer,
+            CPUAccessFlags = CpuAccessFlags.Write,
+            MiscFlags = ResourceOptionFlags.None,
+            StructureByteStride = 20,
+        };
+        _vertexBuffer = _device.CreateBuffer(vbDesc, IntPtr.Zero);
+
+        // The panel is a single-sided plane, but the user will sometimes
+        // be looking at it from behind, so we cull nothing.
+        _rasterizer = _device.CreateRasterizerState(new RasterizerDescription
+        {
+            CullMode = CullMode.None,
+            FillMode = FillMode.Solid,
+            DepthClipEnable = true,
+            ScissorEnable = false,
+            MultisampleEnable = false,
+            AntialiasedLineEnable = false,
+            FrontCounterClockwise = false,
+        });
+
+        // Anisotropic filtering keeps the captured text legible when the
+        // panel is seen at a grazing angle, which is the common case as
+        // soon as the user looks away from it.
+        _sampler = _device.CreateSamplerState(new SamplerDescription
+        {
+            Filter = Filter.Anisotropic,
+            AddressU = TextureAddressMode.Clamp,
+            AddressV = TextureAddressMode.Clamp,
+            AddressW = TextureAddressMode.Clamp,
+            MipLODBias = 0f,
+            MaxAnisotropy = 16,
+            ComparisonFunc = ComparisonFunction.Never,
+            BorderColor = new Vortice.Mathematics.Color4(0, 0, 0, 0),
+            MinLOD = 0f,
+            MaxLOD = float.MaxValue,
+        });
+    }
+
+    private static byte[] LoadShader(string resourceName)
+    {
+        var assembly = typeof(PanelRenderer).Assembly;
+        using var stream = assembly.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Embedded shader resource '{resourceName}' not found.");
+        using var ms = new MemoryStream();
+        stream.CopyTo(ms);
+        return ms.ToArray();
+    }
+
+    // -----------------------------------------------------------------
+    // The frame loop
+    // -----------------------------------------------------------------
+
+    private void FrameLoop(CancellationToken token)
+    {
+        var fpsTimer = System.Diagnostics.Stopwatch.StartNew();
+        int frames = 0;
+
+        while (!token.IsCancellationRequested && _running)
+        {
+            // Pump the window's message queue.  The panel window lives
+            // on THIS thread, so its messages are only dispatched when
+            // this thread pumps — and the ones that matter are
+            // WM_DISPLAYCHANGE and WM_DEVICECHANGE, which the display
+            // guard depends on.  Without this the guard would never
+            // fire, and the window would be relocated onto the primary
+            // display when the glasses are unplugged.
+            PumpMessages();
+
+            // Wait for the flip so we present in step with the panel's
+            // VBlank rather than free-running.
+            if (_frameLatencyWaitable is not null)            {
+                try
+                {
+                    // Wait with a timeout so a missed VBlank (the
+                    // display was unplugged, or the driver stalled)
+                    // cannot wedge the thread forever.
+                    _frameLatencyWaitable.WaitOne(100);
+                }
+                catch
+                {
+                    // The handle was closed underneath us.
+                    break;
+                }
+            }
+
+            if (token.IsCancellationRequested) break;
+
+            try
+            {
+                DrawFrame();
+            }
+            catch (Exception ex)
+            {
+                OnError?.Invoke($"Draw failed: {ex.Message}");
+                Thread.Sleep(50);
+                continue;
+            }
+
+            frames++;
+            if (fpsTimer.Elapsed.TotalSeconds >= 1.0)
+            {
+                var fps = frames / fpsTimer.Elapsed.TotalSeconds;
+                OnFrameRate?.Invoke(fps);
+                frames = 0;
+                fpsTimer.Restart();
+            }
+        }
+    }
+    /// <summary>
+    /// Dispatch any pending window messages.
+    /// </summary>
+    /// <remarks>
+    /// The panel window is created on the render thread, so its
+    /// messages are queued to that thread and only dispatched here.
+    /// Without this pump the window never receives WM_DISPLAYCHANGE,
+    /// and the display guard never runs.
+    ///
+    /// <c>PeekMessage</c> rather than <c>GetMessage</c>, because the
+    /// latter blocks.  The loop is already paced by the swapchain's
+    /// frame-latency wait, so a non-blocking poll is right.
+    /// </remarks>
+    private void PumpMessages()
+    {
+        while (NativeMethods.PeekMessage(out var msg, IntPtr.Zero, 0, 0, NativeMethods.PM_REMOVE))
+        {
+            NativeMethods.TranslateMessage(ref msg);
+            NativeMethods.DispatchMessage(ref msg);
+        }
+    }
+    private void DrawFrame()
+    {
+        if (_context is null || _swapChain is null || _backBuffer is null) return;
+
+        // Pure black: on the Micro-OLED panels a black pixel emits no
+        // light, so the area around the panel is optically transparent
+        // and the user sees the room through it.
+        _context.ClearRenderTargetView(_backBuffer, new Vortice.Mathematics.Color4(0f, 0f, 0f, 0f));
+        if (_depthView is not null)
+            _context.ClearDepthStencilView(_depthView, DepthStencilClearFlags.Depth, 1f, 0);
+
+        var anchor = _anchor;
+        if (anchor is not null && anchor.HasPanel)
+        {
+            var view = anchor.GetView();
+            var corners = view.PanelCorners;
+
+            if (corners.Length == 4)
+            {
+                var projection = anchor.GetProjection();
+
+                // System.Numerics uses the ROW-VECTOR convention: a
+                // point is transformed as v' = v * M, and a product
+                // M1 * M2 applies M1 FIRST and M2 second.
+                //
+                // The full chain is world -> eye -> clip, so:
+                //
+                //     v_clip = v_world * view * projection
+                //
+                // The ORDER matters, and getting it wrong is invisible
+                // in the easy cases and catastrophic in the hard ones.
+                // The previous code built `projection * view`, which
+                // applies the projection BEFORE the view transform.
+                // At zero pitch that still produced a plausible-looking
+                // panel; at a realistic reading pitch it threw the
+                // panel to NDC y = 2.7 (twice the top of the viewport)
+                // and depth z = -0.46 (behind the near plane), so it was
+                // clipped away and the renderer drew nothing at all.
+                //
+                // UpdateConstants() transposes once when it uploads,
+                // which converts the row-major System.Numerics layout
+                // into the column-major layout HLSL expects.  That
+                // single transpose is the only one needed; an extra
+                // transpose here produced NDC coordinates of
+                // ~(130000, 130000) and also drew nothing.
+                var mvp = view.View * projection;
+
+                UpdateVertices(corners);
+                UpdateConstants(mvp);
+
+                _context.IASetInputLayout(_inputLayout);
+                _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+                _context.IASetVertexBuffer(0, _vertexBuffer, 20, 0);
+                _context.OMSetRenderTargets(_backBuffer, _depthView);
+                _context.OMSetBlendState(null);
+                _context.RSSetState(_rasterizer);
+                _context.RSSetViewport(0f, 0f, _backBufferWidth, _backBufferHeight, 0f, 1f);
+
+                _context.VSSetShader(_vertexShader);
+                _context.VSSetConstantBuffer(0, _constantBuffer);
+                _context.PSSetShader(_pixelShader);
+                _context.PSSetConstantBuffer(0, _constantBuffer);
+                _context.PSSetSampler(0, _sampler);
+
+                if (_panelSrv is not null)
+                {
+                    _context.PSSetShaderResource(0, _panelSrv);
+                    _context.Draw(6, 0);
+                }
+            }
+        }
+
+        // If a coverage measurement was requested, do it HERE, while
+        // the render thread still owns the back buffer.  After
+        // Present() the flip-model back buffer's contents are
+        // undefined and the driver is free to discard them.
+        if (_coverageRequested)
+        {
+            _coverageResult = MeasureCoverageOnRenderThread();
+            _coverageRequested = false;
+            _coverageGeneration++;
+        }
+
+        // The snapshot has the same constraint as the coverage
+        // measurement: it must happen here, while the back buffer is
+        // still valid.
+        var snapshot = _snapshotRequest;
+        if (snapshot is not null)
+        {
+            _snapshotRequest = null;
+            SnapshotOnRenderThread(snapshot);
+        }
+
+        _swapChain.Present(1, 0);
+    }
+
+    /// <summary>
+    /// Fraction of the back buffer that is lit, measured on the render
+    /// thread while the back buffer is still valid.
+    /// </summary>
+    private float MeasureCoverageOnRenderThread()
+    {
+        if (_context is null || _swapChain is null || _device is null) return -1f;
+
+        try
+        {
+            using var backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
+            var desc = backBuffer.Description;
+
+            var stagingDesc = new Texture2DDescription
+            {
+                Width = desc.Width,
+                Height = desc.Height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = desc.Format,
+                SampleDescription = new SampleDescription { Count = 1 },
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read,
+                MiscFlags = ResourceOptionFlags.None,
+            };
+
+            using var staging = _device.CreateTexture2D(stagingDesc);
+            _context.CopyResource(staging, backBuffer);
+
+            var mapped = _context.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            try
+            {
+                var rowPitch = mapped.RowPitch;
+                var data = mapped.DataPointer;
+                var width = (int)desc.Width;
+                var height = (int)desc.Height;
+
+                long lit = 0;
+                var total = (long)width * height;
+
+                unsafe
+                {
+                    for (var y = 0; y < height; y++)
+                    {
+                        var row = (byte*)data + (long)y * rowPitch;
+                        for (var x = 0; x < width; x++)
+                        {
+                            // B8G8R8A8: any non-zero channel counts as
+                            // lit.  The area around the panel is pure
+                            // black (an unlit Micro-OLED pixel is
+                            // optically transparent), so any deviation
+                            // from black is the panel itself.
+                            var p = row + (long)x * 4;
+                            if (p[0] != 0 || p[1] != 0 || p[2] != 0) lit++;
+                        }
+                    }
+                }
+
+                return total > 0 ? (float)lit / total : 0f;
+            }
+            finally
+            {
+                _context.Unmap(staging, 0);
+            }
+        }
+        catch (Exception ex)
+        {
+            OnError?.Invoke($"Coverage measurement failed: {ex.Message}");
+            return -1f;
+        }
+    }
+
+    /// <summary>
+    /// Write the current back buffer out as a PNG.
+    /// </summary>
+    /// <remarks>
+    /// The coverage measurement tells us how MUCH of the panel is lit,
+    /// but not whether the content is the right way up or mirrored
+    /// left-to-right — and both of those read as a perfectly healthy
+    /// coverage number.  This is the objective way to check the
+    /// orientation of what actually reaches the Micro-OLED.
+    ///
+    /// Like the coverage measurement, it has to run on the render thread
+    /// while the back buffer is still valid, so the copy is requested
+    /// and the result is collected on the next frame.
+    /// </remarks>
+    /// <param name="path">Where to write the PNG.</param>
+    /// <returns>The path written, or null on failure.</returns>
+    public string? SnapshotBackBuffer(string path)
+    {
+        var request = new SnapshotRequest(path);
+        _snapshotRequest = request;
+        var deadline = Environment.TickCount64 + 3000;
+        while (!request.Completed && Environment.TickCount64 < deadline)
+        {
+            Thread.Sleep(5);
+        }
+        return request.Error is null ? request.Path : null;
+    }
+
+    private sealed class SnapshotRequest
+    {
+        public SnapshotRequest(string path) { Path = path; }
+        public string Path { get; }
+        public bool Completed { get; set; }
+        public string? Error { get; set; }
+    }
+
+    private volatile SnapshotRequest? _snapshotRequest;
+
+    /// <summary>
+    /// Copy the back buffer into a PNG, on the render thread.
+    /// </summary>
+    private unsafe void SnapshotOnRenderThread(SnapshotRequest request)
+    {
+        try
+        {
+            if (_context is null || _swapChain is null || _device is null)
+            {
+                request.Error = "No device.";
+                return;
+            }
+
+            using var backBuffer = _swapChain.GetBuffer<ID3D11Texture2D>(0);
+            var desc = backBuffer.Description;
+
+            var stagingDesc = new Texture2DDescription
+            {
+                Width = desc.Width,
+                Height = desc.Height,
+                MipLevels = 1,
+                ArraySize = 1,
+                Format = desc.Format,
+                SampleDescription = new SampleDescription { Count = 1 },
+                Usage = ResourceUsage.Staging,
+                BindFlags = BindFlags.None,
+                CPUAccessFlags = CpuAccessFlags.Read,
+                MiscFlags = ResourceOptionFlags.None,
+            };
+
+            using var staging = _device.CreateTexture2D(stagingDesc);
+            _context.CopyResource(staging, backBuffer);
+
+            var mapped = _context.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            try
+            {
+                var rowPitch = mapped.RowPitch;
+                var data = mapped.DataPointer;
+                var width = (int)desc.Width;
+                var height = (int)desc.Height;
+
+                using var bmp = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                var rect = new System.Drawing.Rectangle(0, 0, width, height);
+                var bytes = new byte[width * height * 4];
+
+                for (var y = 0; y < height; y++)
+                {
+                    var row = (byte*)data + (long)y * rowPitch;
+                    for (var x = 0; x < width; x++)
+                    {
+                        var p = row + (long)x * 4;
+                        // The back buffer is B8G8R8A8.
+                        var o = (y * width + x) * 4;
+                        bytes[o + 0] = p[2];  // R
+                        bytes[o + 1] = p[1];  // G
+                        bytes[o + 2] = p[0];  // B
+                        bytes[o + 3] = 255;   // A
+                    }
+                }
+
+                var bitmapData = bmp.LockBits(rect, System.Drawing.Imaging.ImageLockMode.WriteOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                try
+                {
+                    Marshal.Copy(bytes, 0, bitmapData.Scan0, bytes.Length);
+                }
+                finally
+                {
+                    bmp.UnlockBits(bitmapData);
+                }
+
+                bmp.Save(request.Path, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            finally
+            {
+                _context.Unmap(staging, 0);
+            }
+        }
+        catch (Exception ex)
+        {
+            request.Error = ex.Message;
+            OnError?.Invoke($"Snapshot failed: {ex.Message}");
+        }
+        finally
+        {
+            request.Completed = true;
+        }
+    }
+
+    private unsafe void UpdateVertices(Vector3[] corners)
+    {
+        // Bottom-left, bottom-right, top-right, top-left, matching the
+        // order PanelPose.Corners() returns.
+        //
+        // Two triangles: (0,1,2) and (0,2,3).
+        //
+        // The UVs are mirrored in U.  PanelPose.Corners() returns
+        // corner 0 as "Centre - hx - hy", where hx runs along
+        // PanelPose.Right.  But Right is cross(normal, up), and with
+        // the normal pointing back at the viewer that direction is the
+        // viewer's LEFT — so corner 0 actually lands at POSITIVE
+        // screen X (the right-hand side of the panel as the user sees
+        // it).  Verified by projecting the corners: with the corrected
+        // matrix chain, corner 0 projects to ndc.x = +0.481 and corner
+        // 1 to ndc.x = -0.481.
+        //
+        // So the texture's u = 0 (its left edge) belongs on corner 1,
+        // not corner 0.  Getting this wrong mirrors the captured
+        // window left-to-right.
+        //
+        // The V coordinate is flipped (v = 1 at the bottom) so the
+        // captured bitmap comes out the right way up rather than
+        // upside-down.
+        var data = new float[]
+        {
+            corners[0].X, corners[0].Y, corners[0].Z, 1f, 1f,
+            corners[1].X, corners[1].Y, corners[1].Z, 0f, 1f,
+            corners[2].X, corners[2].Y, corners[2].Z, 0f, 0f,
+
+            corners[0].X, corners[0].Y, corners[0].Z, 1f, 1f,
+            corners[2].X, corners[2].Y, corners[2].Z, 0f, 0f,
+            corners[3].X, corners[3].Y, corners[3].Z, 1f, 0f,
+        };
+
+        var mapped = _context!.Map(_vertexBuffer!, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+        try
+        {
+            fixed (float* p = data)
+            {
+                var bytes = new ReadOnlySpan<byte>(p, data.Length * sizeof(float));
+                bytes.CopyTo(new Span<byte>((void*)mapped.DataPointer, bytes.Length));
+            }
+        }
+        finally
+        {
+            _context.Unmap(_vertexBuffer!, 0);
+        }
+    }
+
+    private void UpdateConstants(Matrix4x4 mvp)
+    {
+        var data = new float[20];
+        // Matrix4x4's fields are laid out row-major; D3D wants
+        // column-major, which is the transpose.
+        var t = Matrix4x4.Transpose(mvp);
+        data[0]  = t.M11; data[1]  = t.M12; data[2]  = t.M13; data[3]  = t.M14;
+        data[4]  = t.M21; data[5]  = t.M22; data[6]  = t.M23; data[7]  = t.M24;
+        data[8]  = t.M31; data[9]  = t.M32; data[10] = t.M33; data[11] = t.M34;
+        data[12] = t.M41; data[13] = t.M42; data[14] = t.M43; data[15] = t.M44;
+        // uvTransform: identity scale, zero offset.
+        data[16] = 1f; data[17] = 1f; data[18] = 0f; data[19] = 0f;
+
+        _context!.UpdateSubresource(data, _constantBuffer!, 0, 0, 0, null);
+    }
+
+    // -----------------------------------------------------------------
+    // Teardown
+    // -----------------------------------------------------------------
+
+    private void Cleanup()
+    {
+        _sampler?.Dispose();
+        _sampler = null;
+        _rasterizer?.Dispose();
+        _rasterizer = null;
+        _pixelShader?.Dispose();
+        _pixelShader = null;
+        _vertexShader?.Dispose();
+        _vertexShader = null;
+        _inputLayout?.Dispose();
+        _inputLayout = null;
+        _constantBuffer?.Dispose();
+        _constantBuffer = null;
+        _vertexBuffer?.Dispose();
+        _vertexBuffer = null;
+        _depthView?.Dispose();
+        _depthView = null;
+        _backBuffer?.Dispose();
+        _backBuffer = null;
+        _swapChain2?.Dispose();
+        _swapChain2 = null;
+        _swapChain?.Dispose();
+        _swapChain = null;
+        _context?.Dispose();
+        _context = null;
+        _device?.Dispose();
+        _device = null;
+
+        _frameLatencyWaitable?.Dispose();
+        _frameLatencyWaitable = null;
+
+        NativeMethods.SetThreadExecutionState(NativeMethods.ES_CONTINUOUS);
+
+        if (_hwnd != IntPtr.Zero)
+        {
+            NativeMethods.DestroyWindow(_hwnd);
+            _hwnd = IntPtr.Zero;
+        }
+    }
+
+    public void Dispose()
+    {
+        Stop();
+        var thread = _thread;
+        if (thread is not null && thread.IsAlive)
+            thread.Join(TimeSpan.FromSeconds(2));
+        _cts?.Dispose();
+    }
+}

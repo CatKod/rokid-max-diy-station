@@ -68,34 +68,131 @@ public class MahonyFusionTests
     }
 
     [Fact]
-    public void Stationary_With_NonUpright_Accel_Does_Not_Drift_When_AccelTrust_Is_Zero()
+    public void Pure_Yaw_Rotation_Lands_On_The_Yaw_Axis()
+    {
+        // Regression test.  The filter used to compute the quaternion
+        // derivative by hand and hand it to System.Numerics'
+        // Quaternion constructor in (w, x, y, z) order, but that
+        // constructor takes (X, Y, Z, W) — so every component landed
+        // one slot off, and the sign of the w*gy term was flipped too.
+        //
+        // The net effect: the filter integrated rotations about the
+        // wrong axis.  Pitch and roll happened to survive (they are
+        // anchored by the accelerometer), but yaw — the axis with no
+        // gravity reference and the one the user actually turns their
+        // head on — integrated to -66 degrees where +90 was expected.
+        // It looked exactly like a gain-tuning problem and was not one.
+        //
+        // This test pins the axis mapping down.  Rokid device frame:
+        // X = pitch (nod), Y = yaw (turn), Z = roll (tilt).
+        var f = new MahonyFusion(useMagnetometer: false);
+        var rate = MathF.PI / 2f;   // 90 deg/s
+        var dt = 1f / 437f;
+        var ts = 1_000_000_000UL;
+        var axis = Vector3.UnitY;
+        for (int i = 0; i < 437; i++)
+        {
+            var q = Quaternion.CreateFromAxisAngle(axis, rate * dt * i);
+            // Rotate gravity into the body frame so the accelerometer
+            // agrees with the rotation and does not fight it.
+            var accel = Vector3.Transform(new Vector3(0f, 9.80665f, 0f), Quaternion.Inverse(q));
+            f.Update(new ImuSample(ts, accel, axis * rate, Vector3.Zero, true, 0), accelTrust: 0f);
+            ts += 2_287_000UL;
+        }
+
+        var (roll, pitch, yaw) = SyntheticImuSource.ToEulerZYX(f.Orientation);
+        Assert.InRange(MathF.Abs(roll), 0f, 1f);
+        Assert.InRange(MathF.Abs(pitch), 0f, 1f);
+        Assert.InRange(yaw, 89f, 91f);
+    }
+
+    [Fact]
+    public void Pure_Roll_Rotation_Lands_On_The_Roll_Axis()
+    {
+        // The companion of the yaw regression: roll is the axis the
+        // accelerometer can pin down, so it is the one a broken
+        // quaternion product breaks most visibly.
+        var f = new MahonyFusion(useMagnetometer: false);
+        var rate = MathF.PI / 2f;
+        var dt = 1f / 437f;
+        var ts = 1_000_000_000UL;
+        var axis = Vector3.UnitZ;
+        for (int i = 0; i < 437; i++)
+        {
+            var q = Quaternion.CreateFromAxisAngle(axis, rate * dt * i);
+            var accel = Vector3.Transform(new Vector3(0f, 9.80665f, 0f), Quaternion.Inverse(q));
+            f.Update(new ImuSample(ts, accel, axis * rate, Vector3.Zero, true, 0), accelTrust: 0f);
+            ts += 2_287_000UL;
+        }
+
+        var (roll, pitch, yaw) = SyntheticImuSource.ToEulerZYX(f.Orientation);
+        Assert.InRange(MathF.Abs(pitch), 0f, 1f);
+        Assert.InRange(MathF.Abs(yaw), 0f, 1f);
+        Assert.InRange(MathF.Abs(roll), 89f, 91f);
+    }
+
+    [Fact]
+    public void Stationary_With_NonUpright_Accel_Does_Not_Drift()
     {
         // Real Rokid hardware: when the user wears the glasses, the
-        // accel vector is tilted relative to world +Y (the glasses
-        // sit at ~20° back-tilt on the nose).  Mahony's accel
-        // correction will try to "fix" this tilt and cause the
-        // orientation to drift continuously even though the user
-        // is perfectly still.  Passing accelTrust=0 (which the
-        // SpatialAnchor does when the stationary detector agrees)
-        // must keep the orientation stable in that scenario.
+        // accel vector is tilted relative to world +Y (the glasses sit
+        // at ~20-30 deg back-tilt on the nose).  The accelerometer
+        // correction must stay ACTIVE in that case: at a constant
+        // resting tilt the error term a x v is exactly zero, so the
+        // correction does no harm, and it is the only thing pinning
+        // pitch and roll to gravity.
+        //
+        // Disabling it while stationary (which this code used to do)
+        // turned the filter into open-loop gyro integration and
+        // produced a measured, linear ~0.3 deg/min of roll drift on
+        // real hardware.  The filter now handles the genuinely
+        // disturbed case internally, via dynamic-acceleration
+        // rejection.
         var f = new MahonyFusion();
         var src = new SyntheticImuSource();
-        // 5 s of stationary samples; the synthetic source already
-        // produces a non-upright accel (the rest pose has +Y gravity
-        // and a small tilt) which is what the SpatialAnchor feeds in
-        // for a real user.
-        var samples = src.StepEuler(_ => (0f, 0f, 0f), seconds: 5.0f).ToArray();
-        foreach (var s in samples) f.Update(s, accelTrust: 0f);
-        var q = f.Orientation;
-        Assert.True(IsFinite(in q));
-        var (roll, pitch, yaw) = SyntheticImuSource.ToEulerZYX(q);
-        // Without accel correction the orientation should be a
-        // near-identity quaternion; the small drift that does occur
-        // comes from the gyro integral accumulating the residual
-        // bias (windowSize samples have been collected by now).
-        Assert.InRange(MathF.Abs(roll),  0, 3f);
+        var samples = src.StepEuler(_ => (0f, 0f, 0f), seconds: 10.0f).ToArray();
+        foreach (var s in samples) f.Update(s);
+
+        var (roll, pitch, yaw) = SyntheticImuSource.ToEulerZYX(f.Orientation);
+        Assert.InRange(MathF.Abs(roll), 0, 3f);
         Assert.InRange(MathF.Abs(pitch), 0, 3f);
-        Assert.InRange(MathF.Abs(yaw),   0, 3f);
+        Assert.InRange(MathF.Abs(yaw), 0, 3f);
+    }
+
+    [Fact]
+    public void Dynamic_Acceleration_Rejects_Accelerometer_Correction()
+    {
+        // A violent linear acceleration makes |a| stray far from g.
+        // Feeding that in as a gravity reference would tilt the
+        // estimate; the filter must scale the correction down instead.
+        var f = new MahonyFusion();
+        var src = new SyntheticImuSource();
+        var ts = 1_000_000_000UL;
+
+        // Settle first.
+        foreach (var s in src.StepEuler(_ => (0f, 0f, 0f), seconds: 1.0f))
+        {
+            f.Update(s);
+            ts = s.TimestampNs;
+        }
+        var before = f.Orientation;
+
+        // 3 s of 6 m/s^2 sideways linear acceleration, no rotation.
+        for (int i = 0; i < 1300; i++)
+        {
+            var accel = new Vector3(6f, 9.8f, 0f);
+            f.Update(new ImuSample(ts, accel, Vector3.Zero, Vector3.Zero, true, 0));
+            ts += 2_287_000UL;
+        }
+
+        var (roll, pitch, yaw) = SyntheticImuSource.ToEulerZYX(f.Orientation);
+        var (rollBefore, pitchBefore, yawBefore) = SyntheticImuSource.ToEulerZYX(before);
+
+        // The tilt must not have lurched by a large amount just
+        // because the user walked.
+        Assert.InRange(MathF.Abs(pitch - pitchBefore), 0, 12f);
+        Assert.InRange(MathF.Abs(roll - rollBefore), 0, 12f);
+        Assert.InRange(MathF.Abs(yaw - yawBefore), 0, 12f);
     }
 
     [Fact]

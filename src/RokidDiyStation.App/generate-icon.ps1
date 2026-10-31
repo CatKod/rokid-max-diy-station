@@ -1,5 +1,7 @@
 # Generate app.ico for the tray icon
 $ErrorActionPreference = 'Stop'
+# System.Drawing is not auto-loaded in Windows PowerShell 5.1 - load it explicitly.
+Add-Type -AssemblyName System.Drawing
 $icoPath = Join-Path $PSScriptRoot "obj\app.ico"
 $bmp = New-Object System.Drawing.Bitmap(32, 32)
 $g = [System.Drawing.Graphics]::FromImage($bmp)

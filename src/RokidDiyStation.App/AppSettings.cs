@@ -22,8 +22,21 @@ public sealed record AppSettings
     /// <summary>Emission rate cap (packets per second).</summary>
     public int MaxPacketsPerSecond { get; init; } = 250;
 
-    /// <summary>Apply the magnetometer heading correction (M5).</summary>
-    public bool UseMagnetometer { get; init; } = true;
+    /// <summary>
+    /// Apply the magnetometer heading correction.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, and it should stay off.  The Rokid Max's
+    /// magnetometer reads about 108 uT indoors — far outside Earth's
+    /// 25-65 uT field — because the desk, the monitors and the
+    /// glasses' own electronics distort it.  Enabling the correction
+    /// makes the panel slew violently (20-90 degree jumps) as the user
+    /// moves.  Every production 3DoF runtime — Virtual Desktop,
+    /// SteamVR, Bigscreen — disables magnetometers for exactly this
+    /// reason.  The user can still turn it on for curiosity, but the
+    /// default is the correct one.
+    /// </remarks>
+    public bool UseMagnetometer { get; init; } = false;
 
     /// <summary>Low-pass smoothing factor in 0..1; 0 = no smoothing, 1 = frozen.</summary>
     public double Smoothing { get; init; } = 0.0;
@@ -36,6 +49,46 @@ public sealed record AppSettings
 
     /// <summary>Start the tracker minimised to the tray.</summary>
     public bool StartMinimised { get; init; } = false;
+
+    /// <summary>
+    /// The angular comfort cone of the lazy-follow correction, in
+    /// degrees.  Inside the cone the pinned panel is perfectly rigid;
+    /// outside it, the panel glides gently back towards the user's
+    /// gaze so that 3DoF yaw drift never walks the panel out of view.
+    /// 0 disables the lazy follow entirely.
+    /// </summary>
+    public double LazyFollowDeadzoneDegrees { get; init; } = 15.0;
+
+    /// <summary>
+    /// How fast the lazy follow pulls the panel back towards the
+    /// gaze, in inverse seconds.  Higher is snappier; anything above
+    /// about 8 makes the panel chase the user's eyes.
+    /// </summary>
+    public double LazyFollowRatePerSecond { get; init; } = 3.0;
+
+    /// <summary>
+    /// How much of the kinematic neck model's eye translation to apply,
+    /// in 0..1.  0 is pure rotation about the eye (no parallax, no
+    /// swim); 1 is the full Cardboard / LibOVR neck offset.  In 3DoF the
+    /// neck's true position is unknowable, so the model invents a
+    /// translation when the user turns in their chair.  For a flat
+    /// reading panel that invented parallax is worse than none.
+    /// </summary>
+    public double NeckModelScale { get; init; } = 0.3;
+
+    /// <summary>
+    /// How far the pinned panel sits from the eye, in metres.  The
+    /// glasses' optics have a fixed virtual image distance of roughly
+    /// 2-2.5 m, so putting the panel much closer than that creates an
+    /// accommodation-ververgence conflict and eye strain.
+    /// </summary>
+    public double PanelDistanceMetres { get; init; } = 2.0;
+
+    /// <summary>
+    /// The fraction of the glasses' horizontal field of view the panel
+    /// covers.  0.5 means the panel subtends half the FOV.
+    /// </summary>
+    public double PanelFovFraction { get; init; } = 0.5;
 
     /// <summary>Hotkey to set the anchor.  Format: "Space" / "F1" / "Ctrl+Space".</summary>
     public string AnchorHotkey { get; init; } = "Space";
