@@ -137,6 +137,17 @@ public sealed class PanelRenderer : IDisposable
     private uint _backBufferHeight;
     private WaitHandle? _frameLatencyWaitable;
 
+    /// <summary>
+    /// The width of ONE eye's viewport, in back-buffer pixels.
+    /// </summary>
+    /// <remarks>
+    /// In the glasses' side-by-side 3D mode the back buffer is
+    /// 3840x1080 and the bridge chip splits it at the halfway point,
+    /// sending each half to one eye.  In the plain 2D mode the buffer
+    /// is 1920x1080 and the bridge clones it to both eyes.
+    /// </remarks>
+    private uint _eyeViewportWidth;
+
     private volatile bool _running;
     private int _diagFrames;
     private DisplayTarget? _display;
@@ -596,6 +607,11 @@ public sealed class PanelRenderer : IDisposable
         _backBufferWidth = buffer.Description.Width;
         _backBufferHeight = buffer.Description.Height;
 
+        // How wide is ONE eye?  In the side-by-side 3D mode the
+        // bridge splits the buffer down the middle and each eye gets
+        // a 1920x1080 half.
+        _eyeViewportWidth = (uint)RokidDisplayProfile.EyeViewportWidth((int)_backBufferWidth);
+
         _backBuffer = _device!.CreateRenderTargetView(buffer, null);
         buffer.Dispose();
 
@@ -1012,26 +1028,67 @@ public sealed class PanelRenderer : IDisposable
                 _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
                 _context.IASetVertexBuffer(0, _vertexBuffer, 20, 0);
                 _context.OMSetRenderTargets(_backBuffer, _depthView);
-                _context.OMSetBlendState(null);
                 _context.RSSetState(_rasterizer);
-                _context.RSSetViewport(0f, 0f, _backBufferWidth, _backBufferHeight, 0f, 1f);
 
-                _context.VSSetShader(_vertexShader);
-                _context.VSSetConstantBuffer(0, _constantBuffer);
-                _context.PSSetShader(_pixelShader);
-                _context.PSSetConstantBuffer(0, _constantBuffer);
-                _context.PSSetSampler(0, _sampler);
-
-                if (_panelSrv is not null)
+                // The panel is drawn ONCE PER EYE.
+                //
+                // The glasses' bridge chip splits the back buffer down
+                // the middle in the side-by-side 3D mode, and sends
+                // each half to one eye.  So a single draw across the
+                // whole 3840-wide buffer would put half the picture in
+                // the left eye and half in the right - the user would
+                // see two halves of one image, one per eye, and could
+                // not fuse them.
+                //
+                // Instead each eye gets its own 1920x1080 viewport and
+                // the SAME camera, so both eyes see the identical image
+                // of the panel.  That is deliberate: the panel is a
+                // flat plane at a fixed distance, and rendering it
+                // with a real inter-pupillary offset would introduce
+                // 74 pixels of uncrossed disparity at 2 m, which the
+                // birdbath optics cannot converge on.  Zero disparity
+                // also means the virtual cursor lands on the same pixel
+                // in both eyes, so it stays crisp instead of doubled.
+                //
+                // The projection is unchanged: it is always the 16:9
+                // frustum for ONE eye, which is why the content comes
+                // out the right shape now - the earlier 2x horizontal
+                // stretch was the 16:9 frustum being stretched across
+                // the whole 32:9 buffer.
+                //
+                // The panel's own render state is re-applied inside the
+                // loop, because the cursor's draw changes the pixel
+                // shader, the shader resource, the blend state and the
+                // depth state.  Without re-applying them, the SECOND
+                // eye's panel would be drawn with the cursor's texture
+                // and the cursor's shader.
+                var eyeWidth = _eyeViewportWidth;
+                for (uint eye = 0; eye * eyeWidth < _backBufferWidth; eye++)
                 {
-                    _context.PSSetShaderResource(0, _panelSrv);
-                    _context.Draw(6, 0);
-                }
+                    var eyeX = eye * eyeWidth;
+                    _context.RSSetViewport(
+                        eyeX, 0f,
+                        Math.Min(eyeWidth, _backBufferWidth - eyeX),
+                        _backBufferHeight,
+                        0f, 1f);
 
-                // The virtual cursor, drawn as a second quad in the same
-                // pass.  It has to come after the panel so it blends
-                // over the content.
-                DrawCursor(view.PanelPose, mvp);
+                    _context.OMSetBlendState(null);
+                    _context.OMSetDepthStencilState(null, 0);
+                    _context.PSSetShader(_pixelShader);
+                    _context.PSSetConstantBuffer(0, _constantBuffer);
+                    _context.PSSetSampler(0, _sampler);
+                    _context.PSSetShaderResource(0, _panelSrv);
+
+                    if (_panelSrv is not null)
+                    {
+                        _context.Draw(6, 0);
+                    }
+
+                    // The virtual cursor, drawn as a second quad in the
+                    // same pass.  It has to come after the panel so it
+                    // blends over the content.
+                    DrawCursor(view.PanelPose, mvp);
+                }
             }
         }
 
@@ -1097,21 +1154,44 @@ public sealed class PanelRenderer : IDisposable
         // The cursor's centre on the panel's surface.
         var center = Core.Spatial.PanelPointer.FromUv(u, v, pose, CursorNormalOffset);
 
-        // The quad's axes, aligned with the panel's own basis so the
-        // cursor is coplanar with the content it points at.
-        var right = pose.Right;
+        // The quad is built in the VIEWER's axes.
+        //
+        // PanelPose.Right is cross(normal, up), which points to the
+        // viewer's LEFT - deliberately, because a panel facing the
+        // viewer shows its own right edge on the viewer's left.  So
+        // the viewer's right is -Right.
+        //
+        // Getting this wrong is what produced the mirrored cursor: the
+        // quad was built along +Right with the texture's u = 1 on
+        // that edge, which put the texture's u = 0 on the viewer's
+        // right and drew the arrow back-to-front.
+        var viewerRight = -pose.Right;
         var up = Vector3.Normalize(pose.Up);
 
-        var hx = right * (CursorWidthMetres * 0.5f);
+        var hx = viewerRight * (CursorWidthMetres * 0.5f);
         var hy = up * (CursorHeightMetres * 0.5f);
 
-        // The texture's u = 0 is the arrow's LEFT edge, and the
-        // texture's v = 0 is its TOP.  The anchor point of an arrow is
-        // its TIP, not its centre, so the quad is offset so the tip
-        // lands exactly on the cursor's position.
-        var tip = center - hx + hy;
+        // The arrow's HOT POINT is its tip, which in the texture is at
+        // the top-left - i.e. at texture coordinates (0, 0) of the
+        // arrow's own 64x64 box, but the box is not filled: the
+        // polygon starts at (8, 6) and ends at (40, 32) in pixels.
+        //
+        // The cursor's position has to land on the TIP, not on the
+        // corner of the quad, so the quad is offset by the tip's
+        // offset within the texture.  Without this the cursor's hot
+        // point is one full quad-half off from where the user is
+        // pointing, which is the difference between clicking a button
+        // and clicking the gap next to it.
+        //
+        // Tip offset, in the texture's own units (0..1 of the quad):
+        var tipU = 8f / 64f;
+        var tipV = 6f / 64f;
 
-        UpdateCursorVertices(tip, hx, hy);
+        // The quad's bottom-left corner in texture space, such that
+        // the texture's (tipU, tipV) lands exactly on `center`.
+        var origin = center - hx * tipU * 2f + hy * tipV * 2f;
+
+        UpdateCursorVertices(origin, hx, hy);
 
         _context!.OMSetBlendState(_cursorBlendState);
         _context.OMSetDepthStencilState(_cursorDepthState, 0);
@@ -1138,18 +1218,27 @@ public sealed class PanelRenderer : IDisposable
     /// the arrow texture.  The panel's own UVs are flipped in V, so
     /// this one is not - it is a separate texture with its own
     /// orientation.
+    ///
+    /// <paramref name="origin"/> is the corner that carries the
+    /// texture's (0,0) - the TOP-LEFT of the arrow.  The texture's u
+    /// runs along +hx (the viewer's right) and its v runs along -hy
+    /// (downwards), so the quad is built as two triangles:
+    /// (0,0)-(1,0)-(1,1) and (0,0)-(1,1)-(0,1).
     /// </remarks>
-    private unsafe void UpdateCursorVertices(Vector3 tip, Vector3 hx, Vector3 hy)
+    /// <param name="origin">The world position of the texture's (0,0) corner.</param>
+    /// <param name="hx">Half the quad's width, along the viewer's right.</param>
+    /// <param name="hy">Half the quad's height, along the panel's up.</param>
+    private unsafe void UpdateCursorVertices(Vector3 origin, Vector3 hx, Vector3 hy)
     {
         var data = new float[]
         {
-            tip.X, tip.Y, tip.Z, 0f, 0f,
-            (tip + hx * 2f).X, (tip + hx * 2f).Y, (tip + hx * 2f).Z, 1f, 0f,
-            (tip + hx * 2f - hy * 2f).X, (tip + hx * 2f - hy * 2f).Y, (tip + hx * 2f - hy * 2f).Z, 1f, 1f,
+            origin.X, origin.Y, origin.Z, 0f, 0f,
+            (origin + hx * 2f).X, (origin + hx * 2f).Y, (origin + hx * 2f).Z, 1f, 0f,
+            (origin + hx * 2f - hy * 2f).X, (origin + hx * 2f - hy * 2f).Y, (origin + hx * 2f - hy * 2f).Z, 1f, 1f,
 
-            tip.X, tip.Y, tip.Z, 0f, 0f,
-            (tip + hx * 2f - hy * 2f).X, (tip + hx * 2f - hy * 2f).Y, (tip + hx * 2f - hy * 2f).Z, 1f, 1f,
-            (tip - hy * 2f).X, (tip - hy * 2f).Y, (tip - hy * 2f).Z, 0f, 1f,
+            origin.X, origin.Y, origin.Z, 0f, 0f,
+            (origin + hx * 2f - hy * 2f).X, (origin + hx * 2f - hy * 2f).Y, (origin + hx * 2f - hy * 2f).Z, 1f, 1f,
+            (origin - hy * 2f).X, (origin - hy * 2f).Y, (origin - hy * 2f).Z, 0f, 1f,
         };
 
         var mapped = _context!.Map(_cursorVertexBuffer!, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);

@@ -462,7 +462,8 @@ internal static class Program
                 }
                 else
                 {
-                    var diff = DiffImages(dormantPath, activePath, out var cx, out var cy, out var changed);
+                    var diff = DiffImages(dormantPath, activePath, out var cx, out var cy, out var changed,
+                                          out var diffMinX, out var diffMinY, out var diffWidth, out var diffHeight);
                     Console.WriteLine($"    changed pixels      : {changed}");
                     Console.WriteLine($"    cursor at screen    : ({cx}, {cy})");
 
@@ -493,20 +494,32 @@ internal static class Program
                             var expected = ProjectToScreen(station, u, v, target.Width, target.Height);
                             Console.WriteLine($"    cursor uv           : ({u:F4}, {v:F4})");
                             Console.WriteLine($"    expected on screen  : ({expected.X}, {expected.Y})");
+                            Console.WriteLine($"    arrow bbox          : ({cx},{cy}) "
+                                            + $"size {diffWidth}x{diffHeight}");
 
-                            var dx = Math.Abs(expected.X - cx);
-                            var dy = Math.Abs(expected.Y - cy);
-                            // The cursor's tip is the anchor point, and
-                            // the diff's centre of mass is the middle
-                            // of the arrow, so a small offset is
-                            // expected.  A large one means the cursor
-                            // is drawn somewhere other than where it
-                            // clicks.
-                            if (dx > 40 || dy > 40)
+                            // The cursor's TIP is the anchor point: it is
+                            // what the click lands on, and it is the
+                            // arrow's own top-left corner.  So the tip
+                            // has to be inside the arrow's own bounding
+                            // box - within a couple of pixels.
+                            //
+                            // Comparing the centre of mass instead would
+                            // be looser but wrong: the centre of mass of
+                            // an arrow is nowhere near its tip, so a
+                            // mirrored arrow would still "pass" a
+                            // centre-of-mass test.
+                            var tipDx = expected.X - diffMinX;
+                            var tipDy = expected.Y - diffMinY;
+                            Console.WriteLine($"    tip within arrow?   : {tipDx},{tipDy} "
+                                            + $"(arrow is {diffWidth}x{diffHeight})");
+
+                            if (tipDx < -4 || tipDy < -4
+                                || tipDx > diffWidth + 4 || tipDy > diffHeight + 4)
                             {
                                 failures.Add(
-                                    $"the cursor is drawn at ({cx}, {cy}) but clicks at "
-                                    + $"({expected.X}, {expected.Y})");
+                                    $"the cursor's tip is at ({expected.X}, {expected.Y}) but the "
+                                    + $"arrow is drawn at ({diffMinX},{diffMinY})-"
+                                    + $"({diffMinX + diffWidth},{diffMinY + diffHeight})");
                             }
                         }
                     }
@@ -548,11 +561,16 @@ internal static class Program
     /// <param name="centreY">The cursor's centre of mass, in pixels.</param>
     /// <param name="changed">How many pixels differ.</param>
     /// <returns>The number of differing pixels.</returns>
-    private static int DiffImages(string before, string after, out int centreX, out int centreY, out int changed)
+    private static int DiffImages(string before, string after, out int centreX, out int centreY, out int changed,
+                                  out int diffMinX, out int diffMinY, out int diffWidth, out int diffHeight)
     {
         centreX = 0;
         centreY = 0;
         changed = 0;
+        diffMinX = 0;
+        diffMinY = 0;
+        diffWidth = 0;
+        diffHeight = 0;
 
         using var a = new System.Drawing.Bitmap(before);
         using var b = new System.Drawing.Bitmap(after);
@@ -560,11 +578,21 @@ internal static class Program
         var w = Math.Min(a.Width, b.Width);
         var h = Math.Min(a.Height, b.Height);
 
+        // The cursor is drawn ONCE PER EYE, so it appears twice on the
+        // buffer.  The diff is measured over the LEFT eye's viewport
+        // only, so the centre of mass is the cursor's position in that
+        // eye - which is what ProjectToScreen returns.
+        var half = RokidDiyStation.Core.Spatial.RokidDisplayProfile.EyeViewportWidth(w);
+
         long sumX = 0;
         long sumY = 0;
+        var minX = int.MaxValue;
+        var maxX = -1;
+        var minY = int.MaxValue;
+        var maxY = -1;
 
         for (var y = 0; y < h; y++)
-        for (var x = 0; x < w; x++)
+        for (var x = 0; x < Math.Min(half, w); x++)
         {
             var pa = a.GetPixel(x, y);
             var pb = b.GetPixel(x, y);
@@ -580,6 +608,10 @@ internal static class Program
             changed++;
             sumX += x;
             sumY += y;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
         }
 
         if (changed > 0)
@@ -587,23 +619,23 @@ internal static class Program
             centreX = (int)(sumX / changed);
             centreY = (int)(sumY / changed);
         }
+        diffMinX = minX;
+        diffMinY = minY;
+        diffWidth = changed > 0 ? maxX - minX + 1 : 0;
+        diffHeight = changed > 0 ? maxY - minY + 1 : 0;
         return changed;
     }
 
     /// <summary>
-    /// Where the cursor's texture coordinate lands on the panel's
-    /// back buffer, in pixels.
+    /// Where the cursor should appear on the back buffer.
     /// </summary>
     /// <remarks>
-    /// This is the renderer's own maths: the texture coordinate becomes
-    /// a world point on the panel's plane, and that point is projected
-    /// through the view and projection matrices into NDC and then into
-    /// the back buffer's pixels.
-    ///
-    /// The buffer's size has to be the ACTUAL one, not the glasses'
-    /// nominal 1920x1080: the driver can put the display in a
-    /// side-by-side 3840x1080 mode, and the renderer sizes its
-    /// swapchain to whatever the display currently is.
+    /// The panel is drawn ONCE PER EYE, so the cursor appears TWICE on
+    /// the back buffer - once in each eye's viewport.  This returns
+    /// the position in the LEFT eye's viewport, which is where the
+    /// diff's centre of mass is measured from (the diff covers both
+    /// eyes, so the caller averages them, or compares against the
+    /// left one).
     /// </remarks>
     private static (int X, int Y) ProjectToScreen(SpatialStation station, float u, float v, int bufferWidth, int bufferHeight)
     {
@@ -619,7 +651,11 @@ internal static class Program
         var ndcX = clip.X / clip.W;
         var ndcY = clip.Y / clip.W;
 
-        var px = (int)Math.Round((ndcX * 0.5f + 0.5f) * bufferWidth);
+        // The projection is ONE EYE's 16:9 frustum, so the NDC maps
+        // onto one eye's viewport, not the whole buffer.
+        var eyeWidth = RokidDiyStation.Core.Spatial.RokidDisplayProfile.EyeViewportWidth(bufferWidth);
+
+        var px = (int)Math.Round((ndcX * 0.5f + 0.5f) * eyeWidth);
         var py = (int)Math.Round((0.5f - ndcY * 0.5f) * bufferHeight);
         return (px, py);
     }
@@ -656,6 +692,35 @@ internal static class Program
         }
         Console.WriteLine($"    lit left / right    : {leftLit} / {rightLit}");
 
+        // The per-eye check.
+        //
+        // In the glasses' side-by-side 3D mode the back buffer is
+        // 3840x1080 and the bridge splits it at the halfway point, so
+        // each eye gets a 1920x1080 half.  The renderer must draw the
+        // panel ONCE PER EYE with the same camera, which means the two
+        // halves have to be IDENTICAL.
+        //
+        // That is the decisive assertion for the stereo layout: a
+        // single draw across the whole buffer would leave the halves
+        // showing DIFFERENT parts of the page.
+        var half = bmp.Width / 2;
+        int same = 0, differ = 0;
+        for (var y = 0; y < bmp.Height; y += 2)
+        for (var x = 0; x < half; x += 2)
+        {
+            var a = bmp.GetPixel(x, y);
+            var b = bmp.GetPixel(x + half, y);
+            if (Math.Abs(a.R - b.R) > 24 || Math.Abs(a.G - b.G) > 24 || Math.Abs(a.B - b.B) > 24)
+                differ++;
+            else same++;
+        }
+        var total = same + differ;
+        var identical = total > 0 && differ < total * 0.02;
+        Console.WriteLine($"    eyes identical?     : {same}/{total} same, {differ} differ -> "
+                          + (identical
+                              ? "YES - one picture per eye (correct for SBS)"
+                              : "NO - the eyes show different content (WRONG)"));
+
         // Mirror test.
         int diff = 0, sampled = 0;
         for (var y = 0; y < bmp.Height; y += 4)
@@ -670,15 +735,19 @@ internal static class Program
         Console.WriteLine($"    mirrored halves?    : {diff}/{sampled} differ -> "
                           + (mirrored ? "YES - side-by-side stereo" : "NO - one image across the full width"));
 
-        // The probe's page draws a 200x100 red box at (100,50) in CSS
+        // The probe's page draws a 200x100 box at (100,50) in CSS
         // pixels.  Where it lands on the panel says how the content is
         // scaled.
+        //
+        // The box is #c00 in the page's CSS, but what reaches the
+        // panel is whatever the browser composited it into, so the
+        // test is for "strongly red" rather than an exact colour.
         int minX = int.MaxValue, maxX = -1, minY = int.MaxValue, maxY = -1;
         for (var y = 0; y < bmp.Height; y++)
         for (var x = 0; x < bmp.Width; x++)
         {
             var c = bmp.GetPixel(x, y);
-            if (c.R > 200 && c.G < 80 && c.B < 80)
+            if (c.R > 150 && c.G < 80 && c.B < 80)
             {
                 if (x < minX) minX = x;
                 if (x > maxX) maxX = x;
@@ -692,9 +761,13 @@ internal static class Program
             return;
         }
 
+        // The marker appears in BOTH eyes now, so find the one in the
+        // left eye and measure it there.
+        var eyeWidth = half;
         var boxWidth = maxX - minX + 1;
         Console.WriteLine($"    red marker          : x {minX}..{maxX}, y {minY}..{maxY}  ({boxWidth}px wide)");
         Console.WriteLine($"    horizontal scale    : {boxWidth / 200.0:F3}x  (1.000 = the page is 1:1 with the panel)");
+        Console.WriteLine($"    eye viewport        : {eyeWidth}px wide");
     }
 
     /// <summary>

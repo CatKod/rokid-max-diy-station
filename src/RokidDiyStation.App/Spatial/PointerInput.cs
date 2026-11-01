@@ -371,8 +371,15 @@ public sealed class PointerInput : IDisposable
         // content's own pixels is what makes one mouse count move the
         // cursor by one content pixel: the familiar 1:1 feel of an
         // ordinary monitor.
+        //
+        // The gain is per-EYE, not per-display: in the glasses'
+        // side-by-side 3D mode the display is 3840 wide but each eye
+        // only sees 1920 of it, and the mouse's travel maps onto ONE
+        // eye's worth of panel.  Using the full 3840 would make the
+        // cursor move at half speed.
         var (contentWidth, contentHeight) = ContentSize;
-        var scaleX = contentWidth / (float)Math.Max(1, DisplayBounds.Width);
+        var eyeWidth = RokidDisplayProfile.EyeViewportWidth(DisplayBounds.Width);
+        var scaleX = contentWidth / (float)Math.Max(1, eyeWidth);
         var scaleY = contentHeight / (float)Math.Max(1, DisplayBounds.Height);
 
         _cursor.Move(deltaX * scaleX, deltaY * scaleY, contentWidth, contentHeight);
@@ -400,9 +407,24 @@ public sealed class PointerInput : IDisposable
         var view = _viewProvider();
         var projection = _projectionProvider();
 
+        // The mouse is over ONE eye's part of the display.  In the
+        // glasses' side-by-side 3D mode the display is 3840 wide and
+        // the bridge splits it at the halfway point, so the mouse's
+        // pixel has to be mapped into the half it is actually over -
+        // and into that eye's own 1920x1080 viewport - before it is
+        // unprojected.  Unprojecting a 3840-wide pixel against a
+        // 16:9 frustum would put the ray in the wrong place entirely.
+        var eyeWidth = RokidDisplayProfile.EyeViewportWidth(DisplayBounds.Width);
+        var eyeIndex = eyeWidth > 0 ? displayX / eyeWidth : 0;
+        var localX = eyeWidth > 0 ? displayX - eyeIndex * eyeWidth : displayX;
+
+        // Which eye is the user pointing at?  In side-by-side mode the
+        // left half is the left eye and the right half the right eye,
+        // and the content is the same in both, so the ray-cast is the
+        // same either way.  We only need the LOCAL pixel.
         if (!PanelPointer.TryUnproject(
-                displayX, displayY,
-                DisplayBounds.Width, DisplayBounds.Height,
+                localX, displayY,
+                eyeWidth, DisplayBounds.Height,
                 view, projection,
                 out var origin, out var direction))
             return;

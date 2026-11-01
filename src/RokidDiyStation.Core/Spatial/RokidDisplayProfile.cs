@@ -47,6 +47,46 @@ public static class RokidDisplayProfile
     public const float Aspect = 16f / 9f;
 
     /// <summary>
+    /// The width of ONE eye's panel, in pixels.
+    /// </summary>
+    /// <remarks>
+    /// The Rokid Max has two 1920x1080 Micro-OLED panels.  In the
+    /// side-by-side 3D mode the host sees a single 3840x1080 monitor,
+    /// and the bridge chip inside the glasses splits it at x = 1920,
+    /// sending the left half to the left eye and the right half to the
+    /// right eye.  So one eye's panel is always 1920x1080, whichever
+    /// mode the glasses are in.
+    /// </remarks>
+    public const int EyeWidth = 1920;
+
+    /// <summary>The height of ONE eye's panel, in pixels.</summary>
+    public const int EyeHeight = 1080;
+
+    /// <summary>
+    /// True when the given back-buffer size is the side-by-side 3D
+    /// layout: two 1920x1080 eyes packed side by side.
+    /// </summary>
+    /// <remarks>
+    /// The test is on the ASPECT, not on the exact size, so it keeps
+    /// working if the driver offers the mode at a different width.
+    /// A 32:9 buffer (3840x1080) is the only thing the glasses
+    /// produce that is not 16:9.
+    /// </remarks>
+    public static bool IsSideBySide(int width, int height)
+        => width > EyeWidth && Math.Abs((float)width / height - 32f / 9f) < 0.05f;
+
+    /// <summary>
+    /// The width of the viewport that ONE eye receives.
+    /// </summary>
+    /// <remarks>
+    /// In side-by-side mode each eye gets half the buffer; in the
+    /// plain 2D mode the whole buffer goes to both eyes (the bridge
+    /// clones it), so the eye's viewport is the whole thing.
+    /// </remarks>
+    public static int EyeViewportWidth(int backBufferWidth)
+        => IsSideBySide(backBufferWidth, EyeHeight) ? backBufferWidth / 2 : backBufferWidth;
+
+    /// <summary>
     /// The published diagonal field of view, in degrees.  See the class
     /// comment for the sources and the caveats.
     /// </summary>

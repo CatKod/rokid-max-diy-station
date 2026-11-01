@@ -906,13 +906,20 @@ public sealed class SpatialAnchorService
     }
 
     /// <summary>
-    /// The projection matrix for the glasses' display.
+    /// The projection matrix for ONE eye of the glasses' display.
     /// </summary>
     /// <remarks>
     /// The Rokid Max's field of view is the horizontal one: the
     /// display is 16:9 and the vendor publishes a diagonal figure,
     /// which <see cref="RokidDisplayProfile"/> converts.  The
     /// vertical FOV then follows from the aspect ratio.
+    ///
+    /// The aspect is ALWAYS 16:9, even when the glasses are in the
+    /// side-by-side 3D mode and the host sees a 3840x1080 buffer.
+    /// That is because the buffer is two 1920x1080 eyes packed
+    /// together, and each eye is projected with its own 16:9 frustum
+    /// into its own viewport.  The projection describes what ONE eye
+    /// sees, never what the whole buffer contains.
     ///
     /// <see cref="Matrix4x4.CreatePerspectiveFieldOfView"/> is
     /// right-handed with a 0..1 depth range, which is what D3D wants,
