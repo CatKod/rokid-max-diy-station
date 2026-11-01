@@ -419,10 +419,19 @@ public static class NativeMethods
     /// </remarks>
     public static IntPtr SetMouseHook(MouseHookProc callback)
     {
-        // The hook id is the thread id of the CALLER, so the hook's
-        // messages are delivered to the installing thread's queue.
-        var threadId = GetCurrentThreadId();
-        return SetWindowsHookEx(WH_MOUSE_LL, callback, IntPtr.Zero, threadId);
+        // A LOW-LEVEL hook is a GLOBAL hook: the idHook is
+        // WH_MOUSE_LL and the thread id must be 0, meaning "every
+        // thread in every process".  Passing the installing thread's
+        // id - which is what a plain thread-local hook wants - makes
+        // SetWindowsHookEx fail outright, and the hook is silently
+        // absent.
+        //
+        // hMod must be the module that contains the hook procedure.
+        // Our procedure lives in THIS assembly, and GetModuleHandle
+        // with a null name returns the handle of the executable that
+        // contains the calling code, which is exactly right.
+        var module = GetModuleHandle(null);
+        return SetWindowsHookEx(WH_MOUSE_LL, callback, module, 0);
     }
 
     /// <summary>Remove a hook.</summary>
@@ -435,11 +444,16 @@ public static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     private static extern IntPtr SetWindowsHookEx(int idHook, MouseHookProc lpfn, IntPtr hMod, uint threadId);
 
-    [DllImport("user32.dll", SetLastError = true)]
+    // These three wrappers are named after the API they call, but the
+    // P/Invoke's own name has to be stated explicitly - otherwise the
+    // loader looks for "UnhookWindowsHookExNative" in user32.dll and
+    // throws EntryPointNotFoundException the first time the hook is
+    // removed.
+    [DllImport("user32.dll", EntryPoint = "UnhookWindowsHookEx", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool UnhookWindowsHookExNative(IntPtr hhk);
 
-    [DllImport("user32.dll")]
+    [DllImport("user32.dll", EntryPoint = "CallNextHookEx")]
     private static extern IntPtr CallNextHookExNative(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
     [DllImport("kernel32.dll")]
@@ -561,7 +575,14 @@ public static class NativeMethods
         }
     }
 
-    [DllImport("user32.dll", SetLastError = true)]
+    // The real export is called TrackMouseEvent.  The method here is
+    // named TrackMouseEventNative so it does not collide with the
+    // public wrapper above, so the entry point has to be stated
+    // explicitly - otherwise the P/Invoke looks for
+    // "TrackMouseEventNative" and fails at run time with a
+    // MissingMethodException the first time the mouse leaves the
+    // panel.
+    [DllImport("user32.dll", EntryPoint = "TrackMouseEvent", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TrackMouseEventNative(IntPtr lpTme, uint cbSize);
 

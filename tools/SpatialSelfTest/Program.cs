@@ -69,7 +69,11 @@ internal static class Program
         IntPtr source;
         if (filter is not null)
         {
-            source = windows.FirstOrDefault(w => w.Title.Contains(filter, StringComparison.OrdinalIgnoreCase)).Handle;
+            // FirstOrDefault returns NULL when nothing matches, and
+            // reading .Handle off it would throw - so the null is
+            // checked before the handle is taken.
+            var match = windows.FirstOrDefault(w => w.Title.Contains(filter, StringComparison.OrdinalIgnoreCase));
+            source = match?.Handle ?? default;
         }
         else
         {

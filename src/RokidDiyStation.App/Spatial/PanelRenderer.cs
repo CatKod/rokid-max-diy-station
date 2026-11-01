@@ -273,7 +273,9 @@ public sealed class PanelRenderer : IDisposable
         catch (Exception ex)
         {
             _running = false;
-            OnError?.Invoke($"Renderer failed: {ex.Message}");
+            // The full exception, not just its message: a D3D failure
+            // says nothing useful without the frame that produced it.
+            OnError?.Invoke($"Renderer failed: {ex}");
         }
         finally
         {
@@ -801,6 +803,17 @@ public sealed class PanelRenderer : IDisposable
         var width = bitmap.Width;
         var height = bitmap.Height;
 
+        // The texture has to be MAPPABLE, because that is how the
+        // pixels get in.  A texture created with Usage.Default and
+        // CpuAccessFlags.None cannot be mapped at all, and the Map
+        // call fails with E_INVALIDARG - which killed the whole
+        // renderer, cursor pipeline included, the first time it ran.
+        //
+        // D3D11_USAGE_DYNAMIC is the usage that gives us both: the
+        // texture can be mapped for writing AND bound as a shader
+        // resource.  A staging texture can be mapped but NOT bound -
+        // it would have to be copied into a second resource, which is
+        // more machinery for no benefit here.
         var desc = new Texture2DDescription
         {
             Width = (uint)width,
@@ -809,9 +822,9 @@ public sealed class PanelRenderer : IDisposable
             ArraySize = 1,
             Format = Format.B8G8R8A8_UNorm,
             SampleDescription = new SampleDescription { Count = 1 },
-            Usage = ResourceUsage.Default,
+            Usage = ResourceUsage.Dynamic,
             BindFlags = BindFlags.ShaderResource,
-            CPUAccessFlags = CpuAccessFlags.None,
+            CPUAccessFlags = CpuAccessFlags.Write,
             MiscFlags = ResourceOptionFlags.None,
         };
 
