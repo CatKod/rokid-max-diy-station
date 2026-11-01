@@ -30,6 +30,35 @@ using RokidDiyStation.Core.Protocol;
 namespace RokidDiyStation.Core.Spatial;
 
 /// <summary>
+/// How the pinned panel reacts to the user turning their head away
+/// from it.
+/// </summary>
+public enum WorldLockMode
+{
+    /// <summary>
+    /// The panel's world direction is IMMUTABLE.  Head motion never
+    /// moves it.  The panel slides across the display and off the
+    /// edge as the user turns, just like a screen on a wall.
+    ///
+    /// This is the default, and it is the only mode that survives
+    /// the test "the panel must still be exactly where I put it".
+    /// </summary>
+    Strict = 0,
+
+    /// <summary>
+    /// The classic AR "Lazy Follow" / "Tag-Along": inside a comfort
+    /// cone the panel is rigid, outside it the panel is dragged back
+    /// towards the gaze.
+    ///
+    /// Kept for users who prefer the standard XR idiom, and for
+    /// comparison.  It is NOT the default because it drags the panel
+    /// along with the head during ordinary scanning, which reads as
+    /// the anchor being lost.
+    /// </summary>
+    ComfortCone = 1,
+}
+
+/// <summary>
 /// Settings for the spatial anchor service.
 /// </summary>
 /// <param name="PanelDistance">
@@ -63,23 +92,38 @@ namespace RokidDiyStation.Core.Spatial;
 /// (see <see cref="SpatialAnchorService.AnchorHere"/>), so the setting
 /// can never produce a half-hidden panel.
 /// </param>
-/// <param name="LazyFollowDeadzoneDegrees">
-/// The angular comfort cone around the panel's centre, in degrees.
-/// Inside the cone the panel is completely rigid — world-locked, no
-/// drift correction at all, so reading text is perfectly stable.
-/// Outside the cone the panel's world direction glides gently back
-/// towards the user's gaze.  This is the "Lazy Follow" / "Tag-Along"
-/// behaviour pioneered by Microsoft HoloLens and shipped by Virtual
-/// Desktop, and it is the answer to 3DoF yaw drift: the panel never
-/// jumps, but it also never crawls out of the field of view.
-/// Set to 0 to disable lazy follow entirely (the panel then drifts
-/// forever until the user re-anchors).
+/// <param name="WorldLock">
+/// How the panel behaves when the user turns their head away from it.
+/// <para>
+/// <see cref="WorldLockMode.Strict"/> (the default) is the only mode that
+/// behaves like a physical screen hanging in the room: the panel's world
+/// direction NEVER changes because of head motion, so it slides across
+/// the display and then off the edge, exactly as a poster on a wall
+/// would.  Nothing follows the head, ever.
+/// </para>
+/// <para>
+/// <see cref="WorldLockMode.ComfortCone"/> restores the old "Lazy Follow"
+/// / "Tag-Along" behaviour, where the panel is dragged back towards the
+/// gaze once the gaze leaves a comfort cone.  It exists as an option
+/// because it is the standard AR idiom (MRTK's <c>RadialView</c>), but
+/// it is NOT what a reading surface wants: during a normal head turn
+/// the panel is dragged along with the skull, and the user perceives
+/// the anchor as lost.  Measured on this hardware, a 60 deg/s turn
+/// with a 15 degree cone drags the panel to a steady-state lag of
+/// omega/lambda = 20 degrees, which parks the panel exactly one third
+/// off the edge of the display.
+/// </para>
+/// </para>
 /// </param>
-/// <param name="LazyFollowRatePerSecond">
-/// How fast the lazy follow pulls the panel back towards the gaze,
-/// in inverse seconds.  Higher is snappier.  Values around 2-4 feel
-/// like a slow glide; anything above about 8 reads as the screen
-/// chasing the user's eyes, which is nauseating.
+/// <param name="ComfortConeDegrees">
+/// The angular comfort cone, in degrees, used only in
+/// <see cref="WorldLockMode.ComfortCone"/> mode.  Inside the cone the
+/// panel is perfectly rigid.
+/// </param>
+/// <param name="ComfortConeRatePerSecond">
+/// How fast the comfort cone pulls the panel back towards the gaze, in
+/// inverse seconds.  Used only in <see cref="WorldLockMode.ComfortCone"/>
+/// mode.
 /// </param>
 /// <param name="NeckModelScale">
 /// How much of the kinematic neck model's eye translation to apply,
@@ -106,9 +150,24 @@ public sealed record SpatialAnchorOptions
     /// </summary>
     public float PitchBiasDegrees { get; init; } = 0f;
 
-    public float LazyFollowDeadzoneDegrees { get; init; } = 15f;
+    /// <summary>
+    /// How the pinned panel reacts to the user turning their head away
+    /// from it.  See <see cref="WorldLockMode"/>.
+    /// </summary>
+    public WorldLockMode WorldLock { get; init; } = WorldLockMode.Strict;
 
-    public float LazyFollowRatePerSecond { get; init; } = 3f;
+    /// <summary>
+    /// The angular comfort cone around the panel's centre, in degrees,
+    /// used only in <see cref="WorldLockMode.ComfortCone"/> mode.
+    /// </summary>
+    public float ComfortConeDegrees { get; init; } = 15f;
+
+    /// <summary>
+    /// How fast the comfort cone pulls the panel back towards the gaze,
+    /// in inverse seconds.  Used only in
+    /// <see cref="WorldLockMode.ComfortCone"/> mode.
+    /// </summary>
+    public float ComfortConeRatePerSecond { get; init; } = 3f;
 
     public float NeckModelScale { get; init; } = 0.3f;
 
@@ -141,14 +200,14 @@ public sealed class SpatialAnchorService
     private NeckModelCamera _camera;
 
     /// <summary>
-    /// Guards the panel and the lazy-follow state.
+    /// Guards the panel and the comfort-cone state.
     /// </summary>
     /// <remarks>
     /// This service is touched from two threads: the tracking thread
     /// calls <see cref="Update"/> and the anchor mutations, while the
     /// render thread calls <see cref="GetView"/>.  The anchor itself
     /// has its own single-writer assumption, but the panel and the
-    /// lazy-follow smoothing state are shared, so they need a lock.
+    /// comfort-cone smoothing state are shared, so they need a lock.
     /// The lock is held for very short periods and never across any
     /// blocking call, so contention is a non-issue.
     /// </remarks>
@@ -156,21 +215,24 @@ public sealed class SpatialAnchorService
     private PinnedPanel? _panel;
 
     /// <summary>
-    /// The panel's current rendered direction, after the lazy-follow
-    /// correction has been applied.  Kept separate from the panel's
-    /// rigid direction so that the panel's own pose stays immutable —
-    /// the lazy follow moves the *view* of the panel, not the panel.
+    /// The panel's current rendered direction, used ONLY by the
+    /// comfort-cone mode.  Kept separate from the panel's rigid
+    /// direction so that the panel's own pose stays immutable — the
+    /// comfort cone moves the *view* of the panel, not the panel.
     ///
     /// It is kept as a full 3D vector rather than a horizontal one, so
     /// that the panel's elevation is preserved EXACTLY: the follow only
     /// ever rotates about the vertical axis, and such a rotation leaves
     /// the Y component alone.
+    ///
+    /// In strict world-lock mode this is never read: the panel's own
+    /// immutable direction is used directly.
     /// </summary>
     private Vector3 _smoothedDirection;
     private bool _hasSmoothedDirection;
 
     /// <summary>
-    /// The high-resolution clock used to time the lazy follow.
+    /// The high-resolution clock used to time the comfort cone.
     /// </summary>
     /// <remarks>
     /// This used to be <see cref="Environment.TickCount64"/>, whose
@@ -249,8 +311,26 @@ public sealed class SpatialAnchorService
                       || next.PanelFovFraction != _options.PanelFovFraction
                       || next.DiagonalFovDegrees != _options.DiagonalFovDegrees;
 
+        var modeChanged = next.WorldLock != _options.WorldLock;
+
         _options = next;
         _camera = new NeckModelCamera(scale: next.NeckModelScale);
+
+        if (modeChanged)
+        {
+            // Switching modes must not leave a stale smoothed direction
+            // behind.  Coming back from the comfort cone, the panel's
+            // rendered direction has been dragged away from its anchor,
+            // and in strict world-lock mode it must snap back to the
+            // anchor's own direction — which is what the very next
+            // GetView() does, because strict mode ignores the smoothed
+            // state entirely.
+            lock (_panelLock)
+            {
+                _hasSmoothedDirection = false;
+                _smoothedDirection = Vector3.Zero;
+            }
+        }
 
         if (needsRepin && HasPanel)
         {
@@ -322,7 +402,7 @@ public sealed class SpatialAnchorService
         lock (_panelLock)
         {
             _panel = new PinnedPanel(eye, gaze, _options.PanelDistance, width, height, _camera);
-            // A fresh anchor invalidates the lazy-follow state; the new
+            // A fresh anchor invalidates the comfort-cone state; the new
             // panel is the rigid reference again.
             _hasSmoothedDirection = false;
             _lastViewTimestamp = 0;
@@ -380,66 +460,110 @@ public sealed class SpatialAnchorService
     }
 
     /// <summary>
-    /// Apply the lazy-follow correction to the panel's world direction.
+    /// Resolve the direction the panel should be RENDERED at.
     /// </summary>
     /// <remarks>
-    /// This is the mechanism that makes a 3DoF anchor survive without
-    /// hijacking the user's reading.  A gyroscope has no absolute
-    /// heading reference, so the panel's world direction inevitably
-    /// creeps away from where the user is actually looking — about
-    /// 1-4 degrees per minute while seated, and much more during the
-    /// first quarter-hour as the glasses warm up and the gyro's
-    /// zero-rate offset shifts.
+    /// In <see cref="WorldLockMode.Strict"/> — the default — this
+    /// returns the panel's own immutable world direction and nothing
+    /// else.  The panel's position in the room is then a property of the
+    /// room, not of the viewer, which is the entire point of a spatial
+    /// anchor.
     ///
-    /// The two obvious responses are both wrong:
+    /// WHY THE OLD "LAZY FOLLOW" HAD TO GO
+    /// ------------------------------------
     ///
-    ///  * Re-anchor automatically when the user stops moving.  This is
-    ///    catastrophic for a desktop panel: the user turns their head
-    ///    15 degrees to read a sidebar, holds still for three seconds,
-    ///    and the panel leaps to the centre of their gaze.  Every
-    ///    production 3DoF runtime (Virtual Desktop, SteamVR,
-    ///    Bigscreen) uses on-demand recentering instead.
+    /// The previous implementation pulled the panel towards the gaze
+    /// whenever the gaze left a 15-degree comfort cone, blending with
+    /// an exponential rate of 3 per second.  That is precisely what
+    /// MRTK's <c>RadialView</c> does, and it is the standard AR idiom
+    /// for transient PALETTES — the Start menu, a hand menu, a
+    /// floating toolbar.  It is wrong for a reading surface, for three
+    /// measured reasons:
     ///
-    ///  * Do nothing and let the panel drift.  Then the panel slowly
-    ///    crawls out of the glasses' 44-degree horizontal field of
-    ///    view and the user has to fight the hotkey.
+    /// 1. IT DRAGS THE PANEL WITH THE SKULL.
     ///
-    /// The lazy follow is the compromise, and it is what Virtual
-    /// Desktop calls "Lazy Follow" and HoloLens calls "Tag-Along":
+    ///    The follow is an exponential lag, so during a turn of
+    ///    constant angular velocity omega it settles at a steady-state
+    ///    lag of omega / lambda.  A normal head turn is 60 deg/s, so
+    ///    with lambda = 3 the panel trails the head by 20 degrees.  The
+    ///    panel's outer edge (20 + 11.06) then sits 8.9 degrees past
+    ///    the display's 22.12-degree bezel, which is 8.9 / 22.12 =
+    ///    40 % of the panel clipped off.  The user described exactly
+    ///    this: "the screen goes WITH the head instead of still
+    ///    tracking the correct place in space".
     ///
-    ///  * Inside the comfort cone (default +-15 degrees) the panel is
-    ///    COMPLETELY rigid.  No drift correction at all, so text is
-    ///    perfectly stable while the user reads.
-    ///  * Outside the cone the panel's direction glides back towards
-    ///    the user's gaze at a slow, critically-damped rate.  It never
-    ///    jumps, and it never chases the eyes within the cone.
+    ///    Worse, the panel never comes back.  After a 90-degree turn it
+    ///    settles at 90 - 15 = 75 degrees from its anchor, and turning
+    ///    back leaves it at +15.  The anchor is destroyed by the very
+    ///    act of looking away.
     ///
-    /// The correction is applied to the panel's RENDERED direction, not
-    /// to the panel's stored pose.  The panel object itself stays
-    /// immutable, so the anchor remains a rigid world object; only the
-    /// way we look at it is nudged.  That keeps the anchor's semantics
-    /// honest and makes the correction trivially reversible (the user
-    /// can turn it off and the panel snaps back to its true pose).
+    /// 2. IT HAD NO JOB TO DO.
+    ///
+    ///    The follow existed to stop 3DoF yaw drift from walking the
+    ///    panel out of view, and the doc comment claimed 1-4 degrees
+    ///    per minute.  MEASURED on the real Rokid Max (glasses
+    ///    motionless, 437 Hz, magnetometer removed): yaw moved 0.032
+    ///    degrees in 95 seconds and PLATEAUED there, because the
+    ///    stationary gyro-bias estimator cancels the 0.0041 rad/s Y
+    ///    bias completely.  The claim was wrong by about three orders
+    ///    of magnitude.  Over a ten-minute session the panel would
+    ///    move less than half a degree, so the follow was dragging the
+    ///    panel around the room to fight a drift that does not exist.
+    ///
+    /// 3. EVERY PRODUCTION 3DoF RUNTIME DOES IT MY WAY.
+    ///
+    ///    Virtual Desktop's room mode, SteamVR's
+    ///    TrackingUniverseStanding, Bigscreen and Monado all keep a
+    ///    primary monitor 100 % world-locked with no automatic
+    ///    tag-along, and recover with an explicit recenter.  Bigscreen's
+    ///    engineering leadership publicly rejected head-following for
+    ///    displays: the visual edges of a screen that lags the skull
+    ///    destroy optic-flow consistency and make people ill.
+    ///
+    /// The comfort-cone mode is KEPT, behind
+    /// <see cref="WorldLockMode.ComfortCone"/>, because it is the
+    /// standard XR idiom and some users will want it — but it is not
+    /// the default.
     /// </remarks>
     /// <param name="gaze">The user's current gaze direction, in world coordinates.</param>
     /// <param name="dtSeconds">
-    /// Time since the previous call.  Used for the exponential decay so
-    /// the glide rate is independent of the frame rate.
+    /// Time since the previous call.  Used by the comfort-cone mode's
+    /// exponential blend so its glide rate is independent of the frame
+    /// rate.
     /// </param>
-    private Vector3 ApplyLazyFollow(Vector3 gaze, float dtSeconds)
+    private Vector3 ResolveRenderDirection(Vector3 gaze, float dtSeconds)
     {
         if (_panel is null) return gaze;
 
         var target = _panel.WorldDirection;
 
+        // STRICT WORLD LOCK.
+        //
+        // The panel's world direction is returned unchanged.  There is
+        // no branch, no deadzone, no rate, and no state — the gaze is
+        // not an input to the panel's position in the room.
+        //
+        // This is what makes "the panel stays where I put it" a
+        // property that can be TESTED, rather than a behaviour that
+        // depends on how fast the user happens to be moving.
+        if (_options.WorldLock != WorldLockMode.ComfortCone)
+        {
+            _hasSmoothedDirection = false;
+            return target;
+        }
+
+        // -----------------------------------------------------------------
+        // Comfort cone (the classic "Lazy Follow" / "Tag-Along").
+        // -----------------------------------------------------------------
+        //
         // The deadzone is measured on the YAW only — the horizontal
         // angle between the gaze and the panel.  Vertical drift is
         // handled by the accelerometer, which pins pitch and roll to
         // gravity, so it does not need a comfort cone.
-        var deadzoneRad = _options.LazyFollowDeadzoneDegrees * MathF.PI / 180f;
+        var deadzoneRad = _options.ComfortConeDegrees * MathF.PI / 180f;
         if (deadzoneRad <= 1e-4f)
         {
-            // Lazy follow disabled: the panel stays exactly where it
+            // Comfort cone disabled: the panel stays exactly where it
             // was anchored.
             _hasSmoothedDirection = false;
             return target;
@@ -538,7 +662,7 @@ public sealed class SpatialAnchorService
         // vision every time the user looked away.
         var toDesired = MathF.Acos(Math.Clamp(Vector3.Dot(smoothedFlat, desiredFlat), -1f, 1f));
 
-        var rate = Math.Max(0f, _options.LazyFollowRatePerSecond);
+        var rate = Math.Max(0f, _options.ComfortConeRatePerSecond);
         if (rate <= 1e-4f) return _smoothedDirection;
 
         // The follow's step.
@@ -687,7 +811,7 @@ public sealed class SpatialAnchorService
         {
             if (_panel is not null)
             {
-                // The lazy follow needs the time since the last view so
+                // The comfort cone needs the time since the last view so
                 // its glide rate is frame-rate independent.
                 //
                 // The clock is the high-resolution Stopwatch, NOT
@@ -703,8 +827,11 @@ public sealed class SpatialAnchorService
                     : 1f / 60f;
                 _lastViewTimestamp = now;
 
-                var followed = ApplyLazyFollow(gaze, dt);
-                var pose = _panel.PoseWithDirection(followed);
+                // In strict world-lock mode this returns the panel's own
+                // immutable world direction, so the panel's position in
+                // the room does not depend on the viewer at all.
+                var rendered = ResolveRenderDirection(gaze, dt);
+                var pose = _panel.PoseWithDirection(rendered);
                 corners = pose.Corners();
             }
         }

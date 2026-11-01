@@ -40,12 +40,27 @@ public sealed class TrayApplicationContext
     /// </remarks>
     private static Core.Spatial.SpatialAnchorOptions BuildAnchorOptions(AppSettings s) => new()
     {
-        LazyFollowDeadzoneDegrees = (float)Math.Clamp(s.LazyFollowDeadzoneDegrees, 0.0, 45.0),
-        LazyFollowRatePerSecond = (float)Math.Clamp(s.LazyFollowRatePerSecond, 0.0, 10.0),
+        WorldLock = ParseWorldLock(s.WorldLockMode),
+        ComfortConeDegrees = (float)Math.Clamp(s.ComfortConeDegrees, 0.0, 45.0),
+        ComfortConeRatePerSecond = (float)Math.Clamp(s.ComfortConeRatePerSecond, 0.0, 10.0),
         NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
         PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),
         PanelFovFraction = (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0),
     };
+
+    /// <summary>
+    /// Map the persisted mode name onto the enum.
+    /// </summary>
+    /// <remarks>
+    /// Anything unrecognised — including the value in an old
+    /// settings.json written before this setting existed — resolves to
+    /// <see cref="Core.Spatial.WorldLockMode.Strict"/>, which is the
+    /// safe default: a panel that stays in the room.
+    /// </remarks>
+    private static Core.Spatial.WorldLockMode ParseWorldLock(string? mode) =>
+        string.Equals(mode, "ComfortCone", StringComparison.OrdinalIgnoreCase)
+            ? Core.Spatial.WorldLockMode.ComfortCone
+            : Core.Spatial.WorldLockMode.Strict;
 
     public TrayApplicationContext(SettingsService settingsService, TrackingService tracking)
     {

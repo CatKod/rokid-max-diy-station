@@ -37,20 +37,38 @@ public sealed record AppSettings
     public bool StartMinimised { get; init; } = false;
 
     /// <summary>
-    /// The angular comfort cone of the lazy-follow correction, in
-    /// degrees.  Inside the cone the pinned panel is perfectly rigid;
-    /// outside it, the panel glides gently back towards the user's
-    /// gaze so that 3DoF yaw drift never walks the panel out of view.
-    /// 0 disables the lazy follow entirely.
+    /// How the pinned panel reacts when the user turns their head away
+    /// from it.
     /// </summary>
-    public double LazyFollowDeadzoneDegrees { get; init; } = 15.0;
+    /// <remarks>
+    /// <c>Strict</c> (the default) makes the panel behave like a screen
+    /// hanging in the room: its position in the world NEVER changes
+    /// because of head motion.  It slides across the display as the user
+    /// turns and then off the edge, exactly like a poster on a wall.
+    /// <para/>
+    /// <c>ComfortCone</c> is the classic AR "Lazy Follow" / "Tag-Along"
+    /// that Microsoft HoloLens and Virtual Desktop use for transient
+    /// PALETTES: inside a comfort cone the panel is rigid, outside it
+    /// the panel is dragged back towards the gaze.  It is offered for
+    /// users who want the standard XR idiom, but it is NOT the default
+    /// for a reading surface — during a normal head turn it drags the
+    /// panel along with the skull, and the user perceives the spatial
+    /// anchor as lost.
+    /// </remarks>
+    public string WorldLockMode { get; init; } = "Strict";
 
     /// <summary>
-    /// How fast the lazy follow pulls the panel back towards the
-    /// gaze, in inverse seconds.  Higher is snappier; anything above
-    /// about 8 makes the panel chase the user's eyes.
+    /// The angular comfort cone, in degrees.  Only used when
+    /// <see cref="WorldLockMode"/> is <c>ComfortCone</c>.
     /// </summary>
-    public double LazyFollowRatePerSecond { get; init; } = 3.0;
+    public double ComfortConeDegrees { get; init; } = 15.0;
+
+    /// <summary>
+    /// How fast the comfort cone pulls the panel back towards the gaze,
+    /// in inverse seconds.  Only used when <see cref="WorldLockMode"/>
+    /// is <c>ComfortCone</c>.
+    /// </summary>
+    public double ComfortConeRatePerSecond { get; init; } = 3.0;
 
     /// <summary>
     /// How much of the kinematic neck model's eye translation to apply,

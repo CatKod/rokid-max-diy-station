@@ -110,7 +110,7 @@ public partial class MainWindow : Window
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         BindFromSettings();
-        LazyFollowSlider.ValueChanged += (_, _) => UpdateSpatialLabels();
+        ComfortConeSlider.ValueChanged += (_, _) => UpdateSpatialLabels();
         PanelDistanceSlider.ValueChanged += (_, _) => UpdateSpatialLabels();
         NeckScaleSlider.ValueChanged += (_, _) => UpdateSpatialLabels();
     }
@@ -143,9 +143,18 @@ public partial class MainWindow : Window
         RawPosBox.IsChecked = true;
         AutostartBox.IsChecked = s.Autostart;
         StartMinBox.IsChecked  = s.StartMinimised;
-        LazyFollowSlider.Value = s.LazyFollowDeadzoneDegrees;
+        ComfortConeSlider.Value = s.ComfortConeDegrees;
         PanelDistanceSlider.Value = s.PanelDistanceMetres;
         NeckScaleSlider.Value = s.NeckModelScale;
+
+        // Set the radio button BEFORE wiring up the handler, or the
+        // Checked event fires with the other button's state still
+        // showing and the cone row is enabled or hidden wrongly.
+        if (string.Equals(s.WorldLockMode, "ComfortCone", StringComparison.OrdinalIgnoreCase))
+            ComfortConeRadio.IsChecked = true;
+        else
+            StrictWorldLockRadio.IsChecked = true;
+
         UpdateSpatialLabels();
         AppendLog($"Settings loaded from {_settingsService.FilePath}");
     }
@@ -153,13 +162,39 @@ public partial class MainWindow : Window
     /// <summary>Refresh the text readouts next to the spatial sliders.</summary>
     private void UpdateSpatialLabels()
     {
-        LazyFollowLabel.Text = LazyFollowSlider.Value <= 0.01
+        ComfortConeValueLabel.Text = ComfortConeSlider.Value <= 0.01
             ? "off"
-            : $"±{LazyFollowSlider.Value:0}°";
+            : $"±{ComfortConeSlider.Value:0}°";
         PanelDistanceLabel.Text = $"{PanelDistanceSlider.Value:0.0} m";
         NeckScaleLabel.Text = NeckScaleSlider.Value <= 0.01
             ? "none"
             : $"{NeckScaleSlider.Value * 100:0}%";
+
+        // The comfort cone only means anything in comfort-cone mode, so
+        // the whole row is hidden in strict world-lock mode.  Hiding it
+        // rather than disabling it makes it obvious that the setting is
+        // not in effect at all.
+        var comfortConeMode = ComfortConeRadio.IsChecked == true;
+        ComfortConePanel.Visibility = comfortConeMode ? Visibility.Visible : Visibility.Collapsed;
+        ComfortConeLabel.Visibility = comfortConeMode ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// The user picked a different anchoring mode.
+    /// </summary>
+    /// <remarks>
+    /// The change is applied LIVE, not only when "Save settings" is
+    /// pressed, because the whole point of the setting is that the user
+    /// can feel the difference immediately — turning the head and seeing
+    /// whether the panel follows.
+    /// </remarks>
+    private void OnWorldLockModeChanged(object sender, RoutedEventArgs e)
+    {
+        UpdateSpatialLabels();
+        ApplySpatialOptions();
+        AppendLog(ComfortConeRadio.IsChecked == true
+            ? "Anchoring: comfort cone — the panel will be dragged back towards your gaze when you look away."
+            : "Anchoring: strict world-lock — the panel now stays exactly where you put it.");
     }
 
     public void UpdateStatus(TrackingStatus s)
@@ -250,6 +285,38 @@ public partial class MainWindow : Window
         Recenter();
     }
 
+    /// <summary>
+    /// Push the current spatial settings into the running station.
+    /// </summary>
+    /// <remarks>
+    /// Called both when the settings are saved and when the anchoring
+    /// MODE is changed, because the mode is the one setting whose
+    /// effect the user needs to feel immediately — they turn their head
+    /// and watch whether the panel comes with them.
+    /// </remarks>
+    private void ApplySpatialOptions(AppSettings? settings = null)
+    {
+        var s = settings ?? _settingsService.Current with
+        {
+            WorldLockMode = ComfortConeRadio.IsChecked == true ? "ComfortCone" : "Strict",
+            ComfortConeDegrees = ComfortConeSlider.Value,
+            PanelDistanceMetres = PanelDistanceSlider.Value,
+            NeckModelScale = NeckScaleSlider.Value,
+        };
+
+        _station?.ApplyAnchorOptions(new Core.Spatial.SpatialAnchorOptions
+        {
+            WorldLock = ComfortConeRadio.IsChecked == true
+                ? Core.Spatial.WorldLockMode.ComfortCone
+                : Core.Spatial.WorldLockMode.Strict,
+            ComfortConeDegrees = (float)Math.Clamp(s.ComfortConeDegrees, 0.0, 45.0),
+            ComfortConeRatePerSecond = (float)Math.Clamp(s.ComfortConeRatePerSecond, 0.0, 10.0),
+            NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
+            PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),
+            PanelFovFraction = (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0),
+        });
+    }
+
     /// <summary>Tell the window that the next close is a real quit.
     /// Called by <see cref="TrayApplicationContext.Quit"/>.</summary>
     public void MarkQuitting() => _quitting = true;
@@ -270,22 +337,16 @@ public partial class MainWindow : Window
             FovDegrees = FovSlider.Value,
             Autostart = AutostartBox.IsChecked == true,
             StartMinimised = StartMinBox.IsChecked == true,
-            LazyFollowDeadzoneDegrees = LazyFollowSlider.Value,
+            WorldLockMode = ComfortConeRadio.IsChecked == true ? "ComfortCone" : "Strict",
+            ComfortConeDegrees = ComfortConeSlider.Value,
             PanelDistanceMetres = PanelDistanceSlider.Value,
             NeckModelScale = NeckScaleSlider.Value,
         };
         _settingsService.Update(next);
         // Apply the spatial options live, so the user sees the effect
-        // of the comfort cone / distance / neck-scale changes without
+        // of the anchoring mode / distance / neck-scale changes without
         // having to re-pin or restart.
-        _station?.ApplyAnchorOptions(new Core.Spatial.SpatialAnchorOptions
-        {
-            LazyFollowDeadzoneDegrees = (float)Math.Clamp(next.LazyFollowDeadzoneDegrees, 0.0, 45.0),
-            LazyFollowRatePerSecond = (float)Math.Clamp(next.LazyFollowRatePerSecond, 0.0, 10.0),
-            NeckModelScale = (float)Math.Clamp(next.NeckModelScale, 0.0, 1.0),
-            PanelDistance = (float)Math.Clamp(next.PanelDistanceMetres, 0.3, 10.0),
-            PanelFovFraction = (float)Math.Clamp(next.PanelFovFraction, 0.1, 1.0),
-        });
+        ApplySpatialOptions(next);
         try
         {
             var exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 //
 // Tests for the 3DoF anchor-quality work.
 //
@@ -277,7 +277,29 @@ public class AccelRejectionGateTests
     }
 }
 
-public class LazyFollowTests
+/// <summary>
+/// Tests for the panel's anchoring behaviour when the user turns their
+/// head away from it.
+/// </summary>
+/// <remarks>
+/// The behaviour under test is the one the user asked for on real
+/// hardware:
+///
+///   "when I test rotating horizontally, at small head rotations (the
+///    screen stays within the FOV, that's fine) however when the
+///    deviation gets too large (the rendered tab screen is missing
+///    about 1/3) then the screen goes WITH the head instead of still
+///    tracking the correct place in space."
+///
+/// The old implementation did exactly that: it dragged the panel back
+/// towards the gaze whenever the gaze left a comfort cone, which during
+/// an ordinary head turn parks the panel roughly a third of the way
+/// off the display and drags it along with the skull.
+///
+/// The default mode is now STRICT WORLD LOCK: the panel's world
+/// direction is immutable, and no head motion can move it.
+/// </remarks>
+public class WorldLockTests
 {
     private static Vector3 DirectionFromYawDegrees(float deg)
     {
@@ -292,7 +314,7 @@ public class LazyFollowTests
     /// <remarks>
     /// Two things make this necessary rather than merely convenient:
     ///
-    ///   * The lazy follow compares the user's GAZE with the panel's
+    ///   * The anchoring compares the user's GAZE with the panel's
     ///     direction, so a test that wants to exercise it has to
     ///     actually move the head.  Computing a gaze vector and never
     ///     using it tests nothing at all — which is exactly what the
@@ -365,18 +387,20 @@ public class LazyFollowTests
 
     /// <summary>
     /// Build a service whose anchor is already at a known pose, so the
-    /// lazy follow can be exercised without a live IMU stream.
+    /// anchoring can be exercised without a live IMU stream.
     /// </summary>
     private static (SpatialAnchorService Service, PinnedPanel Panel, HeadDriver Driver) MakeService(
-        float deadzoneDegrees = 15f,
+        WorldLockMode mode = WorldLockMode.Strict,
+        float coneDegrees = 15f,
         float ratePerSecond = 3f)
     {
         var anchor = new SpatialAnchor(useMagnetometer: false);
         var service = new SpatialAnchorService(
             new SpatialAnchorOptions
             {
-                LazyFollowDeadzoneDegrees = deadzoneDegrees,
-                LazyFollowRatePerSecond = ratePerSecond,
+                WorldLock = mode,
+                ComfortConeDegrees = coneDegrees,
+                ComfortConeRatePerSecond = ratePerSecond,
                 PanelDistance = 1.5f,
                 PanelFovFraction = 0.5f,
                 PitchBiasDegrees = 0f,
@@ -395,10 +419,231 @@ public class LazyFollowTests
         return (service, panel, driver);
     }
 
+    // -----------------------------------------------------------------
+    // Strict world lock — the default
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// The panel must NOT move when the head turns, however far.
+    /// </summary>
+    /// <remarks>
+    /// This is the regression test for the user's report.  The old
+    /// implementation dragged the panel towards the gaze once the gaze
+    /// left the 15-degree comfort cone, so a 40-degree turn moved the
+    /// panel by 25 degrees — a quarter of the way round the room.
+    ///
+    /// The assertion is deliberately on the panel's WORLD DIRECTION
+    /// rather than on its on-screen position: a world-locked panel
+    /// slides across the display as the head turns (that is correct and
+    /// desirable), so its screen position is expected to change.  Its
+    /// place in the ROOM must not.
+    /// </remarks>
+    [Fact]
+    public void The_Panel_Does_Not_Move_When_The_Head_Turns()
+    {
+        var (service, panel, driver) = MakeService();
+
+        driver.TurnTo(40f);
+        for (var i = 0; i < 120; i++)
+        {
+            service.GetView();
+            Thread.Sleep(16);
+        }
+
+        var offset = HorizontalOffset(service.GetView().PanelCorners, panel);
+        Assert.True(offset < 1e-3f,
+            $"the panel moved {offset:F4} m away from its anchored place when the head " +
+            "turned 40 degrees — it is following the head instead of staying in the room");
+    }
+
+    /// <summary>
+    /// The panel must not move even after a LARGE turn, which is where
+    /// the old implementation dragged it hardest.
+    /// </summary>
+    /// <remarks>
+    /// The user described the failure at the point where about a third
+    /// of the panel was clipped.  The geometry puts that at roughly 11
+    /// degrees of head rotation for a 50 %-FOV panel on a 44.24-degree
+    /// display, and the old follow's steady-state lag of omega/lambda
+    /// = 20 degrees parked the panel exactly there.
+    ///
+    /// A 90-degree turn is well past that point, so it exercises the
+    /// regime where the old code was at its worst.
+    /// </remarks>
+    [Fact]
+    public void The_Panel_Does_Not_Move_After_A_Large_Turn()
+    {
+        var (service, panel, driver) = MakeService();
+
+        driver.TurnTo(90f, rampSeconds: 1.0f, holdSeconds: 2.0f);
+        for (var i = 0; i < 120; i++)
+        {
+            service.GetView();
+            Thread.Sleep(16);
+        }
+
+        var offset = HorizontalOffset(service.GetView().PanelCorners, panel);
+        Assert.True(offset < 1e-3f,
+            $"the panel moved {offset:F4} m from its anchored place after a 90-degree turn " +
+            "— it came round with the head");
+    }
+
+    /// <summary>
+    /// Turning away and back must leave the panel exactly where it
+    /// was.
+    /// </summary>
+    /// <remarks>
+    /// This is the part of the old behaviour that was most destructive.
+    /// The follow measured the gaze against the panel's CURRENT
+    /// direction, so after a 90-degree turn the panel sat at 75
+    /// degrees from its anchor; turning back dragged it to 15 degrees.
+    /// The anchor was destroyed by the act of looking away, and the
+    /// panel never returned to where the user had put it.
+    /// </remarks>
+    [Fact]
+    public void Turning_Away_And_Back_Leaves_The_Panel_Where_It_Was()
+    {
+        var (service, panel, driver) = MakeService();
+
+        driver.TurnTo(90f, rampSeconds: 1.0f, holdSeconds: 1.0f);
+        driver.TurnTo(0f, rampSeconds: 1.0f, holdSeconds: 1.0f);
+        for (var i = 0; i < 120; i++)
+        {
+            service.GetView();
+            Thread.Sleep(16);
+        }
+
+        var offset = HorizontalOffset(service.GetView().PanelCorners, panel);
+        Assert.True(offset < 1e-3f,
+            $"the panel ended up {offset:F4} m from its anchored place after looking away " +
+            "and back — the anchor was destroyed by looking away");
+    }
+
+    /// <summary>
+    /// The panel must slide ACROSS the display as the head turns.
+    /// </summary>
+    /// <remarks>
+    /// The complement of the test above, and just as important: a
+    /// panel that does not move on screen at all would be head-locked,
+    /// which is the failure the whole product exists to avoid.
+    ///
+    /// The on-screen position is the panel's centre in normalised device
+    /// coordinates.  Turning the head right must push the panel to the
+    /// left (negative x) and vice versa.
+    /// </remarks>
+    [Fact]
+    public void The_Panel_Slides_Across_The_Display_As_The_Head_Turns()
+    {
+        var (service, _, driver) = MakeService();
+
+        var centred = NdcCentreX(service);
+        driver.TurnTo(30f);
+        for (var i = 0; i < 30; i++)
+        {
+            service.GetView();
+            Thread.Sleep(16);
+        }
+        var turned = NdcCentreX(service);
+
+        // Turning the head to the right must push the panel to the
+        // LEFT of the display.  A head-locked panel would stay at 0.
+        Assert.True(turned < centred - 0.1f,
+            $"the panel did not slide across the display when the head turned: " +
+            $"ndc.x {centred:F3} -> {turned:F3} — it is head-locked");
+    }
+
+    /// <summary>
+    /// The DEFAULT options must be strict world lock.
+    /// </summary>
+    /// <remarks>
+    /// Every other test in this file names the mode explicitly, so
+    /// without this one the DEFAULT could silently be flipped back to
+    /// the comfort cone and the whole suite would still pass.
+    ///
+    /// This is the test that would have failed on the code the user
+    /// reported: the old default was a 15-degree comfort cone, which
+    /// dragged the panel along with the head.
+    /// </remarks>
+    [Fact]
+    public void The_Default_Options_Are_Strict_World_Lock()
+    {
+        Assert.Equal(WorldLockMode.Strict, SpatialAnchorOptions.Default.WorldLock);
+
+        // And the default must actually behave that way.
+        var anchor = new SpatialAnchor(useMagnetometer: false);
+        var service = new SpatialAnchorService(null, anchor);
+        var driver = new HeadDriver(service);
+        driver.Settle();
+        service.AnchorHere();
+        var panel = service.Panel!;
+
+        driver.TurnTo(60f, rampSeconds: 1.0f, holdSeconds: 2.0f);
+        for (var i = 0; i < 60; i++)
+        {
+            service.GetView();
+            Thread.Sleep(16);
+        }
+
+        var offset = HorizontalOffset(service.GetView().PanelCorners, panel);
+        Assert.True(offset < 1e-3f,
+            $"the DEFAULT options dragged the panel {offset:F4} m from its anchored " +
+            "place — the default must be strict world lock");
+    }
+
+    /// <summary>
+    /// Switching back to strict world lock must snap the panel home.
+    /// </summary>
+    /// <remarks>
+    /// The comfort-cone mode leaves the panel's rendered direction
+    /// dragged away from its anchor.  Turning strict mode back on has
+    /// to undo that immediately, because strict mode's whole promise is
+    /// that the panel's world direction is the anchor's.
+    /// </remarks>
+    [Fact]
+    public void Switching_To_Strict_World_Lock_Snaps_The_Panel_Home()
+    {
+        var (service, panel, driver) = MakeService(mode: WorldLockMode.ComfortCone);
+
+        driver.TurnTo(60f, rampSeconds: 1.0f, holdSeconds: 2.0f);
+        for (var i = 0; i < 120; i++)
+        {
+            service.GetView();
+            Thread.Sleep(16);
+        }
+
+        // In comfort-cone mode the panel really does move.
+        var dragged = HorizontalOffset(service.GetView().PanelCorners, panel);
+        Assert.True(dragged > 0.01f,
+            $"the comfort cone did not drag the panel at all ({dragged:F4} m) — " +
+            "the test is not exercising the mode");
+
+        service.ApplyOptions(new SpatialAnchorOptions
+        {
+            WorldLock = WorldLockMode.Strict,
+            ComfortConeDegrees = 15f,
+            ComfortConeRatePerSecond = 3f,
+            PanelDistance = 1.5f,
+            PanelFovFraction = 0.5f,
+            PitchBiasDegrees = 0f,
+        });
+
+        var offset = HorizontalOffset(service.GetView().PanelCorners, panel);
+        Assert.True(offset < 1e-3f,
+            $"after switching to strict world lock the panel was still {offset:F4} m from " +
+            "its anchored place");
+    }
+
+    // -----------------------------------------------------------------
+    // Comfort cone — the opt-in AR idiom
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Inside the comfort cone the panel is perfectly rigid.
+    /// </summary>
     [Fact]
     public void Inside_The_Comfort_Cone_The_Panel_Is_Perfectly_Rigid()
     {
-        var (service, panel, driver) = MakeService(deadzoneDegrees: 15f);
+        var (service, panel, driver) = MakeService(mode: WorldLockMode.ComfortCone);
 
         // The head is looking 10 degrees to the right — inside the
         // cone.  The panel must not move at all.
@@ -416,13 +661,22 @@ public class LazyFollowTests
         }
     }
 
+    /// <summary>
+    /// Outside the comfort cone the panel glides back.
+    /// </summary>
+    /// <remarks>
+    /// The comfort-cone mode is retained as an option because it is the
+    /// standard AR idiom (MRTK's <c>RadialView</c>), so it has to keep
+    /// working — but it is the behaviour the user rejected, so it must
+    /// NOT be the default.
+    /// </remarks>
     [Fact]
     public void Outside_The_Comfort_Cone_The_Panel_Glides_Back()
     {
-        var (service, panel, driver) = MakeService(deadzoneDegrees: 15f, ratePerSecond: 3f);
+        var (service, panel, driver) = MakeService(mode: WorldLockMode.ComfortCone);
 
         // The head has drifted 40 degrees away (the classic 3DoF yaw
-        // drift).  Over a simulated second, the lazy follow must pull
+        // drift).  Over a simulated second, the comfort cone must pull
         // the panel back towards the cone edge — but it must NOT
         // teleport it there, and it must NOT carry it all the way onto
         // the gaze.
@@ -455,10 +709,13 @@ public class LazyFollowTests
             $"offset {laterOffset:F3} m vs gaze {gazeOffset:F3} m");
     }
 
+    /// <summary>
+    /// The panel stops at the cone edge, not at the gaze.
+    /// </summary>
     [Fact]
     public void The_Panel_Stops_At_The_Cone_Edge_And_Not_The_Gaze()
     {
-        var (service, panel, driver) = MakeService(deadzoneDegrees: 15f, ratePerSecond: 3f);
+        var (service, panel, driver) = MakeService(mode: WorldLockMode.ComfortCone);
 
         driver.TurnTo(40f);
 
@@ -477,29 +734,15 @@ public class LazyFollowTests
         Assert.InRange(offset, expected * 0.9f, expected * 1.1f);
     }
 
-    [Fact]
-    public void Lazy_Follow_Can_Be_Disabled()
-    {
-        var (service, panel, driver) = MakeService(deadzoneDegrees: 0f);
-
-        // With the cone at zero the panel must stay exactly where it
-        // was anchored, no matter how far the head has turned.
-        driver.TurnTo(40f);
-        var view = service.GetView();
-        var expected = panel.Corners();
-        for (var i = 0; i < 4; i++)
-        {
-            var d = (view.PanelCorners[i] - expected[i]).Length();
-            Assert.True(d < 1e-4f, $"corner {i} moved by {d:F5} m with lazy follow off");
-        }
-    }
-
+    /// <summary>
+    /// The panel keeps its distance from the anchor eye.
+    /// </summary>
     [Fact]
     public void The_Panel_Keeps_Its_Distance_From_The_Anchor_Eye()
     {
-        var (service, panel, driver) = MakeService(deadzoneDegrees: 15f);
+        var (service, panel, driver) = MakeService(mode: WorldLockMode.ComfortCone);
 
-        // The lazy follow rotates the panel about the point where it
+        // The comfort cone rotates the panel about the point where it
         // was pinned, so the distance from the anchor eye must not
         // change.
         driver.TurnTo(40f);
@@ -516,6 +759,10 @@ public class LazyFollowTests
         Assert.InRange(distance, panel.Distance - 0.01f, panel.Distance + 0.01f);
     }
 
+    // -----------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------
+
     /// <summary>
     /// The horizontal distance between the rendered panel's centre and
     /// the panel's anchored centre, in metres.
@@ -526,5 +773,18 @@ public class LazyFollowTests
         var anchored = (panel.Corners()[0] + panel.Corners()[2]) * 0.5f;
         var d = centre - anchored;
         return new Vector3(d.X, 0f, d.Z).Length();
+    }
+
+    /// <summary>
+    /// The panel's centre x in normalised device coordinates, where 0
+    /// is the middle of the display and +-1 is its edge.
+    /// </summary>
+    private static float NdcCentreX(SpatialAnchorService service)
+    {
+        var view = service.GetView();
+        var mvp = view.View * service.GetProjection();
+        var centre = (view.PanelCorners[0] + view.PanelCorners[2]) * 0.5f;
+        var clip = Vector4.Transform(new Vector4(centre, 1f), mvp);
+        return clip.X / clip.W;
     }
 }

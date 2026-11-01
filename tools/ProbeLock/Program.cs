@@ -67,23 +67,23 @@ internal static class Program
         Console.WriteLine("  A head-locked panel would stay at ndc.x = 0.");
         Console.WriteLine();
 
-        Probe("comfort cone OFF", deadzone: 0f);
-        Probe("comfort cone 15 deg (default)", deadzone: 15f);
-        Probe("comfort cone 30 deg", deadzone: 30f);
+        Probe("STRICT world lock (default)", WorldLockMode.Strict);
+        Probe("comfort cone 15 deg (tag-along)", WorldLockMode.ComfortCone, deadzone: 15f);
+        Probe("comfort cone 30 deg", WorldLockMode.ComfortCone, deadzone: 30f);
     }
 
-    private static void Probe(string label, float deadzone)
+    private static void Probe(string label, WorldLockMode mode, float deadzone = 0f)
     {
         Console.WriteLine($"--- {label} ---");
 
         var service = new SpatialAnchorService(new SpatialAnchorOptions
         {
-            LazyFollowDeadzoneDegrees = deadzone,
-            LazyFollowRatePerSecond = 3f,
+            WorldLock = mode,
+            ComfortConeDegrees = deadzone,
+            ComfortConeRatePerSecond = 3f,
             PanelDistance = 1.5f,
             PanelFovFraction = 0.5f,
             NeckModelScale = 0f,
-            UseMagnetometer = false,
         });
 
         // Settle at roll 0, pitch -25 DEG, yaw 0.  FromEulerZYX wants

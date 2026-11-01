@@ -50,8 +50,7 @@ public class AnchorActionTests
         var service = new SpatialAnchorService(
             new SpatialAnchorOptions
             {
-                LazyFollowDeadzoneDegrees = 15f,
-                LazyFollowRatePerSecond = 3f,
+                WorldLock = WorldLockMode.Strict,
                 PanelDistance = 1.5f,
                 PanelFovFraction = 0.5f,
                 PitchBiasDegrees = 0f,

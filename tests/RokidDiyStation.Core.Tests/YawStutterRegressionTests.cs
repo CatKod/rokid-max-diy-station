@@ -287,8 +287,9 @@ public class YawStutterRegressionTests
     {
         var service = new SpatialAnchorService(new SpatialAnchorOptions
         {
-            LazyFollowDeadzoneDegrees = deadzoneDegrees,
-            LazyFollowRatePerSecond = ratePerSecond,
+            WorldLock = WorldLockMode.ComfortCone,
+            ComfortConeDegrees = deadzoneDegrees,
+            ComfortConeRatePerSecond = ratePerSecond,
             PanelDistance = 1.5f,
             PanelFovFraction = 0.5f,
             NeckModelScale = 0f,

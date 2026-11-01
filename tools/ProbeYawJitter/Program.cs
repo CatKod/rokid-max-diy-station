@@ -150,8 +150,9 @@ internal static class Program
     {
         var service = new SpatialAnchorService(new SpatialAnchorOptions
         {
-            LazyFollowDeadzoneDegrees = 15f,
-            LazyFollowRatePerSecond = 3f,
+            WorldLock = WorldLockMode.ComfortCone,
+            ComfortConeDegrees = 15f,
+            ComfortConeRatePerSecond = 3f,
             PanelDistance = 1.5f,
             PanelFovFraction = 0.5f,
             NeckModelScale = 0f,

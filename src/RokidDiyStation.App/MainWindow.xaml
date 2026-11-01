@@ -58,6 +58,7 @@
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Source window" VerticalAlignment="Center"/>
                 <ComboBox Grid.Row="0" Grid.Column="1" x:Name="WindowPickerBox" Margin="8,0,8,0"
@@ -69,11 +70,37 @@
                 <Button Grid.Row="0" Grid.Column="3" Content="↻" Click="OnRefreshWindowsClick" Padding="10,4"
                         ToolTip="Re-scan the list of windows" Cursor="Hand"/>
 
-                <TextBlock Grid.Row="1" Grid.Column="0" Text="Comfort cone" VerticalAlignment="Center" Margin="0,8,0,0"
+                <!--
+                    The world-lock mode is the single most important
+                    setting in the app, so it gets a row of its own and a
+                    plain-language explanation rather than a number.
+
+                    "Strict" is the default because a panel that is
+                    dragged along with the head reads as a broken
+                    anchor: the user turns their head to look at
+                    something in the room and the screen comes with them.
+                    "Comfort cone" is the classic AR "Tag-Along" used
+                    for floating palettes, and it is offered for users
+                    who want that behaviour.
+                -->
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Anchoring" VerticalAlignment="Center" Margin="0,8,0,0"
+                           ToolTip="How the panel behaves when you turn your head away from it."/>
+                <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="8,8,0,0">
+                    <RadioButton x:Name="StrictWorldLockRadio" GroupName="WorldLock" Content="Strict world-lock"
+                                 Checked="OnWorldLockModeChanged" Margin="0,0,16,0"
+                                 ToolTip="The panel stays exactly where you put it. Turning your head slides it across the display and then off the edge, like a screen on a wall. Ctrl+C brings it back."/>
+                    <RadioButton x:Name="ComfortConeRadio" GroupName="WorldLock" Content="Comfort cone (tag-along)"
+                                 Checked="OnWorldLockModeChanged"
+                                 ToolTip="The classic AR behaviour: the panel is rigid inside a cone and is dragged back towards your gaze outside it. It follows your head during a turn."/>
+                </StackPanel>
+
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Comfort cone" VerticalAlignment="Center" Margin="0,8,0,0"
+                           x:Name="ComfortConeLabel"
                            ToolTip="Inside this cone the panel is perfectly rigid. Outside it, the panel glides back towards your gaze."/>
-                <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="8,8,0,0">
-                    <Slider x:Name="LazyFollowSlider" Minimum="0" Maximum="30" TickFrequency="5" IsSnapToTickEnabled="True" Width="200"/>
-                    <TextBlock x:Name="LazyFollowLabel" VerticalAlignment="Center" MinWidth="80" Margin="8,0,0,0"/>
+                <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="8,8,0,0"
+                            x:Name="ComfortConePanel">
+                    <Slider x:Name="ComfortConeSlider" Minimum="0" Maximum="30" TickFrequency="5" IsSnapToTickEnabled="True" Width="200"/>
+                    <TextBlock x:Name="ComfortConeValueLabel" VerticalAlignment="Center" MinWidth="80" Margin="8,0,0,0"/>
                 </StackPanel>
             </Grid>
         </GroupBox>
