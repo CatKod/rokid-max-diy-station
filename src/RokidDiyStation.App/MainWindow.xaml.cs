@@ -143,7 +143,8 @@ public partial class MainWindow : Window
         RawPosBox.IsChecked = true;
         AutostartBox.IsChecked = s.Autostart;
         StartMinBox.IsChecked  = s.StartMinimised;
-        ComfortConeSlider.Value = s.ComfortConeDegrees;
+        ComfortConeSlider.Maximum = MaxComfortConeDegrees();
+        ComfortConeSlider.Value = Math.Min(s.ComfortConeDegrees, ComfortConeSlider.Maximum);
         PanelDistanceSlider.Value = s.PanelDistanceMetres;
         NeckScaleSlider.Value = s.NeckModelScale;
 
@@ -157,6 +158,26 @@ public partial class MainWindow : Window
 
         UpdateSpatialLabels();
         AppendLog($"Settings loaded from {_settingsService.FilePath}");
+    }
+
+    /// <summary>
+    /// The widest comfort cone the display can actually show.
+    /// </summary>
+    /// <remarks>
+    /// The slider's range is capped at this value, because a comfort
+    /// cone wider than the display's margin cannot keep its promise:
+    /// the panel would already be clipped by the bezel while the gaze
+    /// was still inside the "rigid" cone.
+    ///
+    /// The core clamps the cone to the same limit, so the slider and
+    /// the behaviour can never disagree.
+    /// </remarks>
+    private double MaxComfortConeDegrees()
+    {
+        var s = _settingsService.Current;
+        return Core.Spatial.SpatialAnchorOptions.MaxUnclippedConeDegrees(
+            (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0),
+            Core.Spatial.RokidDisplayProfile.DiagonalFovDegrees);
     }
 
     /// <summary>Refresh the text readouts next to the spatial sliders.</summary>
@@ -304,16 +325,22 @@ public partial class MainWindow : Window
             NeckModelScale = NeckScaleSlider.Value,
         };
 
+        var fovFraction = (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0);
+
         _station?.ApplyAnchorOptions(new Core.Spatial.SpatialAnchorOptions
         {
             WorldLock = ComfortConeRadio.IsChecked == true
                 ? Core.Spatial.WorldLockMode.ComfortCone
                 : Core.Spatial.WorldLockMode.Strict,
-            ComfortConeDegrees = (float)Math.Clamp(s.ComfortConeDegrees, 0.0, 45.0),
+            // Clamped to what the display can actually show, so the
+            // persisted value and the effective value agree.
+            ComfortConeDegrees = (float)Math.Clamp(
+                s.ComfortConeDegrees, 0.0,
+                Core.Spatial.SpatialAnchorOptions.MaxUnclippedConeDegrees(fovFraction)),
             ComfortConeRatePerSecond = (float)Math.Clamp(s.ComfortConeRatePerSecond, 0.0, 10.0),
             NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
             PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),
-            PanelFovFraction = (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0),
+            PanelFovFraction = fovFraction,
         });
     }
 

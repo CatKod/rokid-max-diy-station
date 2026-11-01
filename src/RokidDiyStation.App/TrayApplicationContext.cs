@@ -41,7 +41,12 @@ public sealed class TrayApplicationContext
     private static Core.Spatial.SpatialAnchorOptions BuildAnchorOptions(AppSettings s) => new()
     {
         WorldLock = ParseWorldLock(s.WorldLockMode),
-        ComfortConeDegrees = (float)Math.Clamp(s.ComfortConeDegrees, 0.0, 45.0),
+        // Clamped to the widest cone the display can actually show: a
+        // wider cone cannot keep its promise of a fully visible panel.
+        ComfortConeDegrees = (float)Math.Clamp(
+            s.ComfortConeDegrees, 0.0,
+            Core.Spatial.SpatialAnchorOptions.MaxUnclippedConeDegrees(
+                (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0))),
         ComfortConeRatePerSecond = (float)Math.Clamp(s.ComfortConeRatePerSecond, 0.0, 10.0),
         NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
         PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),

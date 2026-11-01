@@ -99,7 +99,15 @@
                            ToolTip="Inside this cone the panel is perfectly rigid. Outside it, the panel glides back towards your gaze."/>
                 <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="8,8,0,0"
                             x:Name="ComfortConePanel">
-                    <Slider x:Name="ComfortConeSlider" Minimum="0" Maximum="30" TickFrequency="5" IsSnapToTickEnabled="True" Width="200"/>
+                    <!--
+                        The Maximum is set in code to the widest cone
+                        the display can actually show, so the slider
+                        can never offer a value that would clip the
+                        panel while the gaze is still inside the
+                        cone.  The 30 here is only a fallback for
+                        design-time.
+                    -->
+                    <Slider x:Name="ComfortConeSlider" Minimum="0" Maximum="30" TickFrequency="1" IsSnapToTickEnabled="True" Width="200"/>
                     <TextBlock x:Name="ComfortConeValueLabel" VerticalAlignment="Center" MinWidth="80" Margin="8,0,0,0"/>
                 </StackPanel>
             </Grid>

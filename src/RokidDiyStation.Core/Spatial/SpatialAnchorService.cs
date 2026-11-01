@@ -159,8 +159,51 @@ public sealed record SpatialAnchorOptions
     /// <summary>
     /// The angular comfort cone around the panel's centre, in degrees,
     /// used only in <see cref="WorldLockMode.ComfortCone"/> mode.
+    ///
+    /// The EFFECTIVE value is clamped to what the display can actually
+    /// show, so it is usually smaller than this.  See
+    /// <see cref="MaxUnclippedConeDegrees"/>.
     /// </summary>
     public float ComfortConeDegrees { get; init; } = 15f;
+
+    /// <summary>
+    /// The widest comfort cone that still keeps the whole panel inside
+    /// the display, in degrees.
+    /// </summary>
+    /// <remarks>
+    /// A comfort cone is a promise that the panel is fully visible
+    /// while the gaze is inside it.  That promise is only keepable if
+    /// the cone is narrower than the display's own margin, and for the
+    /// Rokid Max it is not.
+    ///
+    /// The glasses' horizontal field of view is 44.24 degrees, so the
+    /// bezel sits at 22.12 degrees from the centre of the view.  A
+    /// 50 %-FOV panel subtends 22.12 degrees, so its own half-width is
+    /// 11.06 degrees.  A panel that is offset from the centre of the
+    /// view by theta therefore has its outer edge at
+    /// theta + 11.06 degrees.
+    ///
+    /// For the whole panel to stay on screen:
+    ///
+    ///     theta + 11.06 &lt;= 22.12   =>   theta &lt;= 11.06 degrees
+    ///
+    /// A 15-degree cone is therefore WIDER THAN THE DISPLAY ALLOWS:
+    /// at the cone's edge the panel's outer edge is at 26.06 degrees,
+    /// which is 3.94 degrees past the bezel — 17.8 % of the panel
+    /// clipped off.  The "rigid inside the cone" promise is broken
+    /// before the follow has even started moving.
+    ///
+    /// MRTK's own guidance is the same rule of thumb: set the view
+    /// degrees to half the field of view minus half the object's width.
+    /// </remarks>
+    public static float MaxUnclippedConeDegrees(
+        float panelFovFraction = 0.5f,
+        float diagonalFovDegrees = RokidDisplayProfile.DiagonalFovDegrees)
+    {
+        var halfFov = RokidDisplayProfile.HorizontalFovDegrees(diagonalFovDegrees) * 0.5f;
+        var panelHalfWidth = halfFov * panelFovFraction;
+        return MathF.Max(0f, halfFov - panelHalfWidth);
+    }
 
     /// <summary>
     /// How fast the comfort cone pulls the panel back towards the gaze,
@@ -560,7 +603,21 @@ public sealed class SpatialAnchorService
         // angle between the gaze and the panel.  Vertical drift is
         // handled by the accelerometer, which pins pitch and roll to
         // gravity, so it does not need a comfort cone.
-        var deadzoneRad = _options.ComfortConeDegrees * MathF.PI / 180f;
+        //
+        // The cone is CLAMPED to the widest angle that still keeps the
+        // whole panel on the display.  A cone wider than that cannot
+        // keep its own promise: the panel would already be clipped by
+        // the bezel while the gaze was still "inside the cone", and
+        // the user would see the panel half off the screen with no
+        // follow happening at all — which is exactly the "missing a
+        // third of the tab" complaint.
+        //
+        // For the Rokid Max the clamp is 11.06 degrees, so the
+        // default 15-degree cone becomes 11.06.
+        var maxCone = SpatialAnchorOptions.MaxUnclippedConeDegrees(
+            _options.PanelFovFraction, _options.DiagonalFovDegrees);
+
+        var deadzoneRad = MathF.Min(_options.ComfortConeDegrees, maxCone) * MathF.PI / 180f;
         if (deadzoneRad <= 1e-4f)
         {
             // Comfort cone disabled: the panel stays exactly where it

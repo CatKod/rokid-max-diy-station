@@ -712,14 +712,21 @@ public class WorldLockTests
     /// <summary>
     /// The panel stops at the cone edge, not at the gaze.
     /// </summary>
+    /// <remarks>
+    /// The expected edge is the EFFECTIVE cone, which is the
+    /// configured one clamped to what the display can show.  With the
+    /// default 50 %-FOV panel on a 44.24-degree display the clamp is
+    /// 11.06 degrees, so a 15-degree setting behaves as an 11.06-degree
+    /// cone.
+    /// </remarks>
     [Fact]
     public void The_Panel_Stops_At_The_Cone_Edge_And_Not_The_Gaze()
     {
         var (service, panel, driver) = MakeService(mode: WorldLockMode.ComfortCone);
 
+        // Let it settle.
         driver.TurnTo(40f);
 
-        // Let it settle.
         for (var i = 0; i < 200; i++)
         {
             service.GetView();
@@ -729,9 +736,77 @@ public class WorldLockTests
         var offset = HorizontalOffset(service.GetView().PanelCorners, panel);
 
         // The gaze is 40 degrees from the anchor, so the cone edge is
-        // 40 - 15 = 25 degrees away.
-        var expected = panel.Distance * 2f * MathF.Sin(12.5f * MathF.PI / 180f);
+        // 40 - cone degrees away.
+        var effectiveCone = MathF.Min(
+            15f,
+            SpatialAnchorOptions.MaxUnclippedConeDegrees(panelFovFraction: 0.5f));
+        var expected = panel.Distance * 2f * MathF.Sin((40f - effectiveCone) * 0.5f * MathF.PI / 180f);
         Assert.InRange(offset, expected * 0.9f, expected * 1.1f);
+    }
+
+    /// <summary>
+    /// The comfort cone is clamped to what the display can show.
+    /// </summary>
+    /// <remarks>
+    /// The Rokid Max has a 44.24-degree horizontal field of view, so
+    /// the bezel is at 22.12 degrees.  A 50 %-FOV panel's own
+    /// half-width is 11.06 degrees, so a panel offset by theta has
+    /// its outer edge at theta + 11.06.
+    ///
+    /// A 15-degree cone therefore puts the panel's edge at 26.06
+    /// degrees — 3.94 degrees PAST the bezel, which is 17.8 % of the
+    /// panel clipped off — while the gaze is still inside the "rigid"
+    /// cone.  The comfort cone would be making a promise it cannot
+    /// keep.
+    ///
+    /// This test is what the Gemini deep research caught: the clamp
+    /// was missing, and an earlier note in this repository had
+    /// rejected the idea on the grounds that it would "break the
+    /// documented deadzone semantics".  That rejection was wrong —
+    /// the clamp is exactly the semantics a comfort cone is supposed
+    /// to have.
+    /// </remarks>
+    [Fact]
+    public void The_Comfort_Cone_Never_Exceeds_What_The_Display_Can_Show()
+    {
+        // The clamp itself.
+        var maxCone = SpatialAnchorOptions.MaxUnclippedConeDegrees(panelFovFraction: 0.5f);
+        Assert.Equal(11.06f, maxCone, 2);
+
+        // And the behaviour: with a 15-degree cone configured, the
+        // panel must never come to rest at an offset that clips it.
+        var (service, panel, driver) = MakeService(
+            mode: WorldLockMode.ComfortCone, coneDegrees: 15f);
+
+        driver.TurnTo(40f);
+        for (var i = 0; i < 200; i++)
+        {
+            service.GetView();
+            Thread.Sleep(16);
+        }
+
+        var offset = HorizontalOffset(service.GetView().PanelCorners, panel);
+
+        // The panel comes to rest at the cone edge, measured from the
+        // GAZE.  The offset above is measured from the ANCHOR, so the
+        // two have to be combined:
+        //
+        //   panel angle from anchor  = 2*asin(offset / (2*distance))
+        //   gaze angle from anchor   = 40 degrees
+        //   panel edge from the gaze = (gaze - panel) + panel half-width
+        //
+        // With the clamp the panel sits 11.06 degrees from the anchor
+        // less than the gaze, so its outer edge is at
+        // 11.06 + 11.06 = 22.12 degrees — exactly the bezel.
+        var panelAngleFromAnchor =
+            2f * MathF.Asin(MathF.Min(1f, offset / (2f * panel.Distance))) * 180f / MathF.PI;
+        var gazeAngleFromAnchor = 40f;
+        var outerEdge = (gazeAngleFromAnchor - panelAngleFromAnchor) + 11.06f;
+
+        Assert.True(outerEdge <= 22.12f + 0.5f,
+            $"the panel came to rest with its outer edge at {outerEdge:F2} degrees from " +
+            $"the gaze, but the bezel is at 22.12 degrees — it is clipped even though " +
+            "the gaze is inside the comfort cone");
     }
 
     /// <summary>
