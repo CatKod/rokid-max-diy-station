@@ -9,9 +9,10 @@
 #
 #   Panel.vertex.cso   - the vertex shader
 #   Panel.pixel.cso    - the pixel shader
+#   Cursor.pixel.cso   - the pixel shader for the virtual 3D cursor
 #
-# Both are added to the project as EmbeddedResource with a logical name,
-# so the C# side can load them with Assembly.GetManifestResourceStream.
+# All three are added to the project as EmbeddedResource with a logical
+# name, so the C# side can load them with Assembly.GetManifestResourceStream.
 #
 # The file names matter more than they look: MSBuild decides whether an
 # EmbeddedResource is a satellite assembly from the file's extension.  An
@@ -52,6 +53,7 @@ if (-not $fxc) {
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 $src = Join-Path $shaderDir "Panel.hlsl"
+$cursorSrc = Join-Path $shaderDir "Cursor.hlsl"
 
 Write-Host "Using $fxc"
 
@@ -63,5 +65,9 @@ if ($LASTEXITCODE -ne 0) { throw "fxc failed for the vertex shader" }
 
 & $fxc /nologo /T ps_4_0_level_9_1 /E PSMain /Fo (Join-Path $outDir "Panel.pixel.cso") $src
 if ($LASTEXITCODE -ne 0) { throw "fxc failed for the pixel shader" }
+
+# The cursor's pixel shader.  It shares the panel's vertex shader.
+& $fxc /nologo /T ps_4_0_level_9_1 /E PSCursor /Fo (Join-Path $outDir "Cursor.pixel.cso") $cursorSrc
+if ($LASTEXITCODE -ne 0) { throw "fxc failed for the cursor pixel shader" }
 
 Write-Host "Shaders compiled into $outDir"

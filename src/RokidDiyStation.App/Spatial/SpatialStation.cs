@@ -48,6 +48,8 @@ public sealed class SpatialStation : IDisposable
     private readonly WindowCapture _capture = new();
     private readonly SpatialAnchorService _anchor;
     private DisplayGuard? _guard;
+    private VirtualCursor? _cursor;
+    private PointerInput? _pointerInput;
 
     private Thread? _pumpThread;
     private CancellationTokenSource? _cts;
@@ -61,6 +63,23 @@ public sealed class SpatialStation : IDisposable
 
     /// <summary>Raised for informational messages worth showing to the user.</summary>
     public event Action<string>? OnLog;
+
+    /// <summary>
+    /// Raised when the user clicks, scrolls or presses a key while the
+    /// pointer is over the glasses' display.
+    /// </summary>
+    /// <remarks>
+    /// This is the hook the input layer uses to forward the interaction
+    /// to the captured application - CDP for a browser, an app-native
+    /// channel for everything else.
+    /// </remarks>
+    public event Action<PointerEvent>? OnPointerEvent;
+
+    /// <summary>
+    /// Raised when the physical pointer enters or leaves the glasses'
+    /// display.
+    /// </summary>
+    public event Action<bool>? OnPointerInsideChanged;
 
     /// <summary>The anchor service the renderer reads its camera from.</summary>
     public SpatialAnchorService Anchor => _anchor;
@@ -82,6 +101,24 @@ public sealed class SpatialStation : IDisposable
         _renderer.OnError += msg => Log($"Renderer: {msg}");
         _renderer.OnFrameRate += fps => OnFrameRate?.Invoke(fps);
         _capture.OnSourceClosed += () => Log("The captured window was closed.");
+
+        // The virtual cursor and the mouse tracker.  The tracker reads
+        // the panel's pose from the anchor service, so the cursor is
+        // always resolved against the panel as it is RIGHT NOW - which
+        // is what keeps it glued to the content when the head turns.
+        _cursor = new VirtualCursor();
+        _pointerInput = new PointerInput(
+            _cursor,
+            () => _anchor.HasPanel ? _anchor.GetView().PanelPose : null,
+            () => _anchor.GetView().View,
+            () => _anchor.GetProjection());
+        _pointerInput.OnPointerEvent += e => OnPointerEvent?.Invoke(e);
+        _pointerInput.OnPointerInsideChanged += inside => OnPointerInsideChanged?.Invoke(inside);
+        _renderer.Cursor = _cursor;
+
+        // The window procedure is static, so it reaches the tracker
+        // through this static hook.
+        PanelRenderer.CurrentPointerInput = _pointerInput;
     }
 
     /// <summary>Raised with the renderer's measured frame rate.</summary>
@@ -128,6 +165,13 @@ public sealed class SpatialStation : IDisposable
             }
 
             Log($"Display: {display}");
+
+            // The pointer tracker needs to know which part of the
+            // virtual desktop belongs to the glasses, so it can tell
+            // "the pointer is over the panel" from "the pointer is over
+            // the XP-Pen".
+            if (_pointerInput is not null)
+                _pointerInput.DisplayBounds = display.Bounds;
 
             _cts = new CancellationTokenSource();
             _running = true;
@@ -301,6 +345,15 @@ public sealed class SpatialStation : IDisposable
             {
                 _capture.TryUpdate();
                 _renderer.PanelTexture = _capture.Texture;
+
+                // The differential mapping's gain is expressed in the
+                // captured window's pixels, so the tracker needs to
+                // know the content's size.
+                if (_pointerInput is not null)
+                {
+                    var (w, h) = _capture.Size;
+                    if (w > 0 && h > 0) _pointerInput.ContentSize = (w, h);
+                }
             }
 
             Thread.Sleep(2);

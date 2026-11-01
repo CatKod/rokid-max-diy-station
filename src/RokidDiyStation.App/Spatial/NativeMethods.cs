@@ -185,6 +185,212 @@ public static class NativeMethods
     public const uint SWP_NOSIZE = 0x0001;
 
     // -----------------------------------------------------------------
+    // Mouse input
+    // -----------------------------------------------------------------
+
+    /// <summary>The mouse moved over the window.</summary>
+    public const uint WM_MOUSEMOVE = 0x0200;
+
+    /// <summary>The left mouse button went down.</summary>
+    public const uint WM_LBUTTONDOWN = 0x0201;
+
+    /// <summary>The left mouse button came up.</summary>
+    public const uint WM_LBUTTONUP = 0x0202;
+
+    /// <summary>The right mouse button went down.</summary>
+    public const uint WM_RBUTTONDOWN = 0x0204;
+
+    /// <summary>The right mouse button came up.</summary>
+    public const uint WM_RBUTTONUP = 0x0205;
+
+    /// <summary>The middle mouse button went down.</summary>
+    public const uint WM_MBUTTONDOWN = 0x0207;
+
+    /// <summary>The middle mouse button came up.</summary>
+    public const uint WM_MBUTTONUP = 0x0208;
+
+    /// <summary>The mouse wheel was turned.</summary>
+    public const uint WM_MOUSEWHEEL = 0x020A;
+
+    /// <summary>The window is asked to set the mouse cursor shape.</summary>
+    public const uint WM_SETCURSOR = 0x0020;
+
+    /// <summary>The mouse entered the window's client area.</summary>
+    public const uint WM_MOUSEENTER = 0x02A3;
+
+    /// <summary>The mouse left the window's client area.</summary>
+    public const uint WM_MOUSELEAVE = 0x02A4;
+
+    /// <summary>The left button is held down (wParam of a mouse message).</summary>
+    public const int MK_LBUTTON = 0x0001;
+
+    /// <summary>The right button is held down (wParam of a mouse message).</summary>
+    public const int MK_RBUTTON = 0x0002;
+
+    /// <summary>The middle button is held down (wParam of a mouse message).</summary>
+    public const int MK_MBUTTON = 0x0010;
+
+    /// <summary>The SHIFT key is held down.</summary>
+    public const int MK_SHIFT = 0x0004;
+
+    /// <summary>The CTRL key is held down.</summary>
+    public const int MK_CONTROL = 0x0008;
+
+    /// <summary>The ALT key is held down.</summary>
+    public const int MK_ALT = 0x0020;
+
+    /// <summary>
+    /// Set the cursor shape for the current window.
+    /// </summary>
+    /// <remarks>
+    /// Passing <see cref="IntPtr.Zero"/> removes the cursor from the
+    /// screen, but the mouse is still tracked normally - GetCursorPos
+    /// keeps working and raw input keeps flowing.  That is exactly what
+    /// the virtual cursor needs: the physical mouse stays a real input
+    /// device, we simply stop drawing the OS arrow over the glasses.
+    ///
+    /// The effect is per-display: the cursor image lives on the GPU's
+    /// hardware cursor plane of whichever output the pointer is on, so
+    /// the arrow reappears the instant the pointer crosses onto
+    /// another screen.
+    /// </remarks>
+    [DllImport("user32.dll")]
+    public static extern IntPtr SetCursor(IntPtr hCursor);
+
+    /// <summary>The current cursor position, in virtual-desktop pixels.</summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+
+    /// <summary>Virtual key codes we care about.</summary>
+    public const int VK_SHIFT = 0x10;
+    public const int VK_CONTROL = 0x11;
+    public const int VK_MENU = 0x12;
+
+    /// <summary>
+    /// Whether a key is currently held down.
+    /// </summary>
+    /// <remarks>
+    /// This queries the calling thread's key state, which is updated
+    /// as the thread's message queue is pumped.  It is the same source
+    /// Chromium itself consults, which is why it is the right way to
+    /// build the modifier bitmask for a synthetic click.
+    /// </remarks>
+    [DllImport("user32.dll")]
+    public static extern short GetKeyState(int nVirtKey);
+
+    /// <summary>
+    /// Which monitor a virtual-desktop point is on.
+    /// </summary>
+    /// <param name="x">The point's X coordinate.</param>
+    /// <param name="y">The point's Y coordinate.</param>
+    /// <param name="hwnd">
+    /// The window to fall back on when the point is on no monitor.
+    /// </param>
+    /// <param name="flags">Which monitor to pick when the point is on none.</param>
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+
+    /// <summary>Return the monitor nearest the given point.</summary>
+    public const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
+
+    /// <summary>A point in virtual-desktop coordinates.</summary>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT
+    {
+        public int x;
+        public int y;
+    }
+
+    /// <summary>
+    /// The X coordinate of a mouse message's lParam.
+    /// </summary>
+    public static int GetXLParam(IntPtr lParam) => (short)(lParam.ToInt64() & 0xFFFF);
+
+    /// <summary>
+    /// The Y coordinate of a mouse message's lParam.
+    /// </summary>
+    public static int GetYLParam(IntPtr lParam) => (short)((lParam.ToInt64() >> 16) & 0xFFFF);
+
+    /// <summary>
+    /// The signed wheel delta of a WM_MOUSEWHEEL message's wParam.
+    /// </summary>
+    /// <remarks>
+    /// A multiple of 120 (WHEEL_DELTA) per detent.  Positive means the
+    /// wheel was turned away from the user.
+    /// </remarks>
+    public static int GetWheelDelta(IntPtr wParam) => (short)((wParam.ToInt64() >> 16) & 0xFFFF);
+
+    // -----------------------------------------------------------------
+    // Mouse tracking
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Ask for WM_MOUSELEAVE when the pointer leaves the window.
+    /// </summary>
+    /// <remarks>
+    /// Without this, the panel window would never learn that the
+    /// pointer had left the glasses' display — and that matters,
+    /// because the virtual cursor has to be deactivated when the
+    /// pointer goes back to the XP-Pen, and the OS arrow has to come
+    /// back with it.
+    ///
+    /// The TRACKMOUSEEVENT structure's size varies with the platform
+    /// (64 bytes on x64, 40 on x86), and the API that reports it takes
+    /// a pointer whose first field IS the size.  So we probe: fill in a
+    /// candidate size and see whether the system accepts it.
+    /// </remarks>
+    /// <param name="hwnd">The window to track.</param>
+    /// <param name="leave">True to request WM_MOUSELEAVE.</param>
+    public static void TrackMouseEvent(IntPtr hwnd, bool leave)
+    {
+        var size = (uint)GetTrackMouseEventSize();
+        var buffer = Marshal.AllocHGlobal((int)size);
+        try
+        {
+            // cbSize
+            Marshal.WriteInt32(buffer, 0, (int)size);
+            // dwFlags: TME_LEAVE
+            Marshal.WriteInt32(buffer, 4, leave ? 0x00000002 : 0);
+            // hwndTrack
+            Marshal.WriteIntPtr(buffer, 8, hwnd);
+            // dwHoverTime
+            Marshal.WriteInt32(buffer, 16, 0);
+            TrackMouseEventNative(buffer, (uint)size);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TrackMouseEventNative(IntPtr lpTme, uint cbSize);
+
+    /// <summary>
+    /// The size of the TRACKMOUSEEVENT structure on this machine.
+    /// </summary>
+    private static int GetTrackMouseEventSize()
+    {
+        for (var size = 16; size <= 128; size += 8)
+        {
+            var buffer = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.WriteInt32(buffer, 0, size);
+                if (TrackMouseEventNative(buffer, (uint)size))
+                    return size;
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+        return 64;
+    }
+
+    // -----------------------------------------------------------------
     // Message pump
     // -----------------------------------------------------------------
 

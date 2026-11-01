@@ -225,12 +225,19 @@ public sealed record SpatialAnchorOptions
 /// <param name="EyePosition">The eye's world position.</param>
 /// <param name="GazeDirection">The direction the user is looking.</param>
 /// <param name="HeadOrientation">The head's orientation, for the HUD.</param>
+/// <param name="PanelPose">
+/// The panel's full pose - its centre, normal, up axis and size.  The
+/// corners alone are not enough for the virtual cursor, which has to
+/// convert a world point into the panel's texture coordinates, and
+/// that needs the basis vectors and the dimensions.
+/// </param>
 public readonly record struct AnchorView(
     Matrix4x4 View,
     Vector3[] PanelCorners,
     Vector3 EyePosition,
     Vector3 GazeDirection,
-    Quaternion HeadOrientation);
+    Quaternion HeadOrientation,
+    PanelPose PanelPose);
 
 /// <summary>
 /// Owns the fusion filter, the world anchor and the pinned panel, and
@@ -863,6 +870,7 @@ public sealed class SpatialAnchorService
 
         var gaze = NeckModelCamera.Forward(headQ);
         var corners = Array.Empty<Vector3>();
+        var panelPose = default(PanelPose);
 
         lock (_panelLock)
         {
@@ -890,10 +898,11 @@ public sealed class SpatialAnchorService
                 var rendered = ResolveRenderDirection(gaze, dt);
                 var pose = _panel.PoseWithDirection(rendered);
                 corners = pose.Corners();
+                panelPose = pose;
             }
         }
 
-        return new AnchorView(view, corners, eye, gaze, headQ);
+        return new AnchorView(view, corners, eye, gaze, headQ, panelPose);
     }
 
     /// <summary>

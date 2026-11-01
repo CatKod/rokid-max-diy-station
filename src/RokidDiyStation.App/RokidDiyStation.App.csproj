@@ -46,6 +46,10 @@
                       LogicalName="RokidDiyStation.App.Spatial.Shaders.PanelVertex.cso" />
     <EmbeddedResource Include="obj\Shaders\$(Configuration)\Panel.pixel.cso"
                       LogicalName="RokidDiyStation.App.Spatial.Shaders.PanelPixel.cso" />
+    <!-- The virtual cursor's pixel shader.  It has no luma clamp, so
+         the cursor's dark outline survives on the Micro-OLED display. -->
+    <EmbeddedResource Include="obj\Shaders\$(Configuration)\Cursor.pixel.cso"
+                      LogicalName="RokidDiyStation.App.Spatial.Shaders.CursorPixel.cso" />
   </ItemGroup>
 
   <ItemGroup>

@@ -58,6 +58,15 @@ public sealed class PanelRenderer : IDisposable
     /// screen would land on our window instead of on the app behind
     /// it, and (with WS_EX_NOACTIVATE) the click would be swallowed
     /// entirely.
+    ///
+    /// NOTE: this flag does NOT make the window click-through.  It is
+    /// a painting-order flag: a layered window hit-tests by alpha, and
+    /// WS_EX_TRANSPARENT makes it transparent to the hit-test walk.
+    /// Our panel is not layered — a D3D11 flip-model swapchain cannot
+    /// be — so the panel has always been receiving WM_MOUSEMOVE,
+    /// WM_LBUTTONDOWN and WM_SETCURSOR.  That is exactly what we
+    /// want now: the mouse messages are the input channel for the
+    /// virtual cursor.
     /// </remarks>
     private const int WS_EX_TRANSPARENT = 0x00000020;
 
@@ -99,6 +108,31 @@ public sealed class PanelRenderer : IDisposable
     private ID3D11SamplerState? _sampler;
     private ID3D11RasterizerState? _rasterizer;
 
+    // --- The virtual cursor ------------------------------------------
+    private ID3D11Buffer? _cursorVertexBuffer;
+    private ID3D11PixelShader? _cursorPixelShader;
+    private ID3D11ShaderResourceView? _cursorSrv;
+    private ID3D11BlendState? _cursorBlendState;
+    private ID3D11DepthStencilState? _cursorDepthState;
+    private ID3D11Texture2D? _cursorTexture;
+
+    /// <summary>
+    /// The virtual cursor the renderer draws.
+    /// </summary>
+    /// <remarks>
+    /// The renderer only READS it — it draws the cursor at whatever
+    /// position the cursor currently holds.  The cursor's position is
+    /// owned by <see cref="PointerInput"/>, which is the thing that
+    /// talks to the mouse.
+    /// </remarks>
+    public VirtualCursor? Cursor
+    {
+        get => _cursor;
+        set => _cursor = value;
+    }
+
+    private VirtualCursor? _cursor;
+
     private uint _backBufferWidth;
     private uint _backBufferHeight;
     private WaitHandle? _frameLatencyWaitable;
@@ -133,6 +167,16 @@ public sealed class PanelRenderer : IDisposable
 
     /// <summary>The render window's handle, once it exists.</summary>
     public IntPtr WindowHandle => _hwnd;
+
+    /// <summary>
+    /// The physical mouse tracker, once the window exists.
+    /// </summary>
+    /// <remarks>
+    /// The window procedure is static, so it cannot reach an instance
+    /// member directly.  This static hook is how the messages get
+    /// from the window procedure to the instance's input handler.
+    /// </remarks>
+    public static PointerInput? CurrentPointerInput { get; set; }
 
     /// <summary>
     /// Ask the render thread to measure how much of the panel is lit,
@@ -202,9 +246,7 @@ public sealed class PanelRenderer : IDisposable
             };
             _thread.Start();
         }
-    }
-
-    public void Stop()
+    }    public void Stop()
     {
         lock (_lock)
         {
@@ -277,6 +319,11 @@ public sealed class PanelRenderer : IDisposable
         NativeMethods.SetWindowDisplayAffinity(_hwnd, WDA_EXCLUDEFROMCAPTURE);
 
         PositionWindow(_hwnd, display);
+
+        // Ask to be told when the pointer leaves, so the virtual cursor
+        // can go dormant and the OS arrow can come back on the other
+        // display.
+        NativeMethods.TrackMouseEvent(_hwnd, leave: true);
 
         // Keep the glasses' display awake while we are rendering.
         NativeMethods.SetThreadExecutionState(
@@ -364,13 +411,28 @@ public sealed class PanelRenderer : IDisposable
     /// The panel window's message handler.
     /// </summary>
     /// <remarks>
-    /// Two things matter here, and both are about not stealing the
-    /// user's attention:
+    /// Four things matter here:
     ///
     ///  * WM_MOUSEACTIVATE — the user clicks on the glasses' display.
     ///   Returning MA_NOACTIVATE stops Windows from giving our window
     ///   the focus, which would pull the user out of whatever they
     ///   were typing in.
+    ///
+    ///  * WM_SETCURSOR — the moment the pointer is over our window,
+    ///   Windows asks us what shape the cursor should be.  Answering
+    ///   with SetCursor(NULL) removes the OS arrow from the glasses'
+    ///   display, and ONLY from that display: the arrow lives on the
+    ///   GPU's hardware cursor plane of whichever output the pointer
+    ///   is on, so the moment the pointer crosses onto the XP-Pen,
+    ///   that display's own window sets the arrow again and it comes
+    ///   back instantly.  The mouse is still fully tracked while
+    ///   hidden, which is what the virtual cursor needs.
+    ///
+    ///  * WM_MOUSEMOVE / WM_LBUTTONDOWN / … — the actual input for
+    ///   the virtual cursor.  The panel is an opaque window covering
+    ///   the whole output, so these messages arrive even though
+    ///   WS_EX_TRANSPARENT is set (that flag is about painting order,
+    ///   not hit-testing).
     ///
     ///  * WM_DISPLAYCHANGE / WM_DEVICECHANGE — the glasses were
     ///   unplugged or re-plugged.  The check has to happen HERE,
@@ -386,6 +448,29 @@ public sealed class PanelRenderer : IDisposable
         {
             case NativeMethods.WM_MOUSEACTIVATE:
                 return NativeMethods.MA_NOACTIVATE;
+
+            case NativeMethods.WM_SETCURSOR:
+                // Hide the OS arrow over the glasses' display.
+                //
+                // SetCursor(NULL) removes the cursor from the screen
+                // but leaves the mouse fully tracked: GetCursorPos
+                // keeps working and the mouse messages keep arriving.
+                // We are not disabling the mouse - we are replacing
+                // the arrow with our own 3D cursor on the panel.
+                NativeMethods.SetCursor(IntPtr.Zero);
+                return new IntPtr(1); // TRUE: we set the cursor.
+
+            case NativeMethods.WM_MOUSEMOVE:
+            case NativeMethods.WM_LBUTTONDOWN:
+            case NativeMethods.WM_LBUTTONUP:
+            case NativeMethods.WM_RBUTTONDOWN:
+            case NativeMethods.WM_RBUTTONUP:
+            case NativeMethods.WM_MBUTTONDOWN:
+            case NativeMethods.WM_MBUTTONUP:
+            case NativeMethods.WM_MOUSEWHEEL:
+            case NativeMethods.WM_MOUSELEAVE:
+                CurrentPointerInput?.HandleMouseMessage(msg, wParam, lParam);
+                break;
 
             case NativeMethods.WM_DISPLAYCHANGE:
                 // The display topology changed.  This is the message
@@ -623,6 +708,146 @@ public sealed class PanelRenderer : IDisposable
             MinLOD = 0f,
             MaxLOD = float.MaxValue,
         });
+
+        CreateCursorPipeline();
+    }
+
+    /// <summary>
+    /// The virtual cursor's own pipeline: a texture, a pixel shader
+    /// without the limited-range clamp, a blend state and a depth
+    /// state.
+    /// </summary>
+    /// <remarks>
+    /// The cursor is drawn as a SECOND draw call in the same pass as
+    /// the panel, not as a copy into the panel's texture.  Baking it
+    /// into the captured bitmap would need a GPU copy every frame, and
+    /// sampling a small cursor at 50 % scale blurs its edges.
+    ///
+    /// The depth state writes NO depth (the cursor must not occlude the
+    /// panel), but it does TEST depth, so the cursor is hidden when it
+    /// falls behind the panel's plane - which happens when the user
+    /// turns far enough that the panel is edge-on.
+    /// </remarks>
+    private void CreateCursorPipeline()
+    {
+        var cursorBytes = LoadShader("RokidDiyStation.App.Spatial.Shaders.CursorPixel.cso");
+        _cursorPixelShader = _device!.CreatePixelShader(cursorBytes);
+
+        // Its own vertex buffer: 6 vertices, 20 bytes each, same
+        // layout as the panel's.
+        var vbDesc = new BufferDescription
+        {
+            ByteWidth = 6 * 20,
+            Usage = ResourceUsage.Dynamic,
+            BindFlags = BindFlags.VertexBuffer,
+            CPUAccessFlags = CpuAccessFlags.Write,
+            MiscFlags = ResourceOptionFlags.None,
+            StructureByteStride = 20,
+        };
+        _cursorVertexBuffer = _device.CreateBuffer(vbDesc, IntPtr.Zero);
+
+        // Standard alpha blending: the cursor texture has transparent
+        // pixels around the arrow, and they must not darken the panel.
+        //
+        // The two-argument constructor sets the blend factors for every
+        // render target and turns blending on, which is exactly what
+        // the cursor needs.
+        _cursorBlendState = _device.CreateBlendState(
+            new BlendDescription(Blend.SourceAlpha, Blend.InverseSourceAlpha));
+
+        // Depth TEST on, depth WRITE off.  The cursor is lifted 1.5 mm
+        // off the panel's surface so it never z-fights with it.
+        _cursorDepthState = _device.CreateDepthStencilState(new DepthStencilDescription
+        {
+            DepthEnable = true,
+            DepthWriteMask = DepthWriteMask.Zero,
+            DepthFunc = ComparisonFunction.LessEqual,
+            StencilEnable = false,
+            StencilReadMask = 0xFF,
+            StencilWriteMask = 0xFF,
+            FrontFace = new DepthStencilOperationDescription
+            {
+                StencilFailOp = StencilOperation.Keep,
+                StencilDepthFailOp = StencilOperation.Keep,
+                StencilPassOp = StencilOperation.Keep,
+                StencilFunc = ComparisonFunction.Always,
+            },
+            BackFace = new DepthStencilOperationDescription
+            {
+                StencilFailOp = StencilOperation.Keep,
+                StencilDepthFailOp = StencilOperation.Keep,
+                StencilPassOp = StencilOperation.Keep,
+                StencilFunc = ComparisonFunction.Always,
+            },
+        });
+
+        // The cursor texture: a white arrow with a black outline,
+        // generated in code so the app carries no image assets.
+        using var bitmap = CursorTexture.Create();
+        _cursorTexture = CreateTextureFromBitmap(bitmap);
+        _cursorSrv = _device.CreateShaderResourceView(_cursorTexture);
+    }
+
+    /// <summary>
+    /// Upload a 32-bit BGRA bitmap into a D3D11 texture.
+    /// </summary>
+    /// <remarks>
+    /// The bitmap is locked and copied row by row.  System.Drawing's
+    /// Format32bppArgb is BGRA in memory, which is exactly the
+    /// B8G8R8A8_UNorm layout D3D wants, so no swizzle is needed.
+    /// </remarks>
+    private unsafe ID3D11Texture2D CreateTextureFromBitmap(System.Drawing.Bitmap bitmap)
+    {
+        var width = bitmap.Width;
+        var height = bitmap.Height;
+
+        var desc = new Texture2DDescription
+        {
+            Width = (uint)width,
+            Height = (uint)height,
+            MipLevels = 1,
+            ArraySize = 1,
+            Format = Format.B8G8R8A8_UNorm,
+            SampleDescription = new SampleDescription { Count = 1 },
+            Usage = ResourceUsage.Default,
+            BindFlags = BindFlags.ShaderResource,
+            CPUAccessFlags = CpuAccessFlags.None,
+            MiscFlags = ResourceOptionFlags.None,
+        };
+
+        var device = _device!;
+        var texture = device.CreateTexture2D(desc);
+
+        var data = bitmap.LockBits(
+            new System.Drawing.Rectangle(0, 0, width, height),
+            System.Drawing.Imaging.ImageLockMode.ReadOnly,
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            var context = device.ImmediateContext;
+            var mapped = context.Map(texture, 0, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+            try
+            {
+                var rowBytes = (uint)(width * 4);
+                var src = data.Scan0;
+                for (var y = 0; y < height; y++)
+                {
+                    var row = (byte*)src + (long)y * data.Stride;
+                    var dst = (byte*)mapped.DataPointer + (long)y * mapped.RowPitch;
+                    Buffer.MemoryCopy(row, dst, rowBytes, rowBytes);
+                }
+            }
+            finally
+            {
+                context.Unmap(texture, 0);
+            }
+        }
+        finally
+        {
+            bitmap.UnlockBits(data);
+        }
+
+        return texture;
     }
 
     private static byte[] LoadShader(string resourceName)
@@ -676,6 +901,10 @@ public sealed class PanelRenderer : IDisposable
 
             try
             {
+                // Poll the physical mouse before drawing: the cursor's
+                // new position has to be in this frame's vertex buffer.
+                CurrentPointerInput?.Poll();
+
                 DrawFrame();
             }
             catch (Exception ex)
@@ -785,6 +1014,11 @@ public sealed class PanelRenderer : IDisposable
                     _context.PSSetShaderResource(0, _panelSrv);
                     _context.Draw(6, 0);
                 }
+
+                // The virtual cursor, drawn as a second quad in the same
+                // pass.  It has to come after the panel so it blends
+                // over the content.
+                DrawCursor(view.PanelPose, mvp);
             }
         }
 
@@ -810,6 +1044,114 @@ public sealed class PanelRenderer : IDisposable
         }
 
         _swapChain.Present(1, 0);
+    }
+
+    /// <summary>
+    /// The cursor's world size, in metres.
+    /// </summary>
+    /// <remarks>
+    /// A standard Windows arrow subtends roughly 1 degree of visual
+    /// angle at reading distance.  At the panel's default distance of
+    /// 2 m, 1 degree is about 35 mm; we use a slightly smaller quad
+    /// so the cursor does not dominate the content it is pointing at.
+    /// </remarks>
+    private const float CursorWidthMetres = 0.020f;
+    private const float CursorHeightMetres = 0.026f;
+
+    /// <summary>
+    /// How far the cursor floats off the panel's surface, in metres.
+    /// </summary>
+    /// <remarks>
+    /// 1.5 mm along the normal, towards the viewer.  Without it the
+    /// cursor z-fights with the panel, which shows up as a flickering
+    /// edge; with it, the cursor is unambiguously in front.
+    /// </remarks>
+    private const float CursorNormalOffset = 0.0015f;
+
+    /// <summary>
+    /// Draw the virtual cursor, if it is active.
+    /// </summary>
+    /// <param name="pose">The panel's pose.</param>
+    /// <param name="mvp">The world-to-clip matrix.</param>
+    private void DrawCursor(PanelPose pose, Matrix4x4 mvp)
+    {
+        var cursor = _cursor;
+        if (cursor is null || !cursor.IsActive) return;
+        if (_cursorVertexBuffer is null || _cursorSrv is null || _cursorPixelShader is null) return;
+
+        var (u, v) = cursor.Position;
+
+        // The cursor's centre on the panel's surface.
+        var center = Core.Spatial.PanelPointer.FromUv(u, v, pose, CursorNormalOffset);
+
+        // The quad's axes, aligned with the panel's own basis so the
+        // cursor is coplanar with the content it points at.
+        var right = pose.Right;
+        var up = Vector3.Normalize(pose.Up);
+
+        var hx = right * (CursorWidthMetres * 0.5f);
+        var hy = up * (CursorHeightMetres * 0.5f);
+
+        // The texture's u = 0 is the arrow's LEFT edge, and the
+        // texture's v = 0 is its TOP.  The anchor point of an arrow is
+        // its TIP, not its centre, so the quad is offset so the tip
+        // lands exactly on the cursor's position.
+        var tip = center - hx + hy;
+
+        UpdateCursorVertices(tip, hx, hy);
+
+        _context!.OMSetBlendState(_cursorBlendState);
+        _context.OMSetDepthStencilState(_cursorDepthState, 0);
+        _context.IASetInputLayout(_inputLayout);
+        _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
+        _context.IASetVertexBuffer(0, _cursorVertexBuffer, 20, 0);
+        _context.VSSetShader(_vertexShader);
+        _context.VSSetConstantBuffer(0, _constantBuffer);
+        _context.PSSetShader(_cursorPixelShader);
+        _context.PSSetConstantBuffer(0, _constantBuffer);
+        _context.PSSetSampler(0, _sampler);
+        _context.PSSetShaderResource(0, _cursorSrv);
+        _context.Draw(6, 0);
+    }
+
+    /// <summary>
+    /// Write the cursor quad's six vertices.
+    /// </summary>
+    /// <remarks>
+    /// Same vertex format as the panel's: position (3 floats) plus a
+    /// texture coordinate (2 floats).
+    ///
+    /// The UVs run 0..1 across the quad, with (0,0) at the top-left of
+    /// the arrow texture.  The panel's own UVs are flipped in V, so
+    /// this one is not - it is a separate texture with its own
+    /// orientation.
+    /// </remarks>
+    private unsafe void UpdateCursorVertices(Vector3 tip, Vector3 hx, Vector3 hy)
+    {
+        var data = new float[]
+        {
+            tip.X, tip.Y, tip.Z, 0f, 0f,
+            (tip + hx * 2f).X, (tip + hx * 2f).Y, (tip + hx * 2f).Z, 1f, 0f,
+            (tip + hx * 2f - hy * 2f).X, (tip + hx * 2f - hy * 2f).Y, (tip + hx * 2f - hy * 2f).Z, 1f, 1f,
+
+            tip.X, tip.Y, tip.Z, 0f, 0f,
+            (tip + hx * 2f - hy * 2f).X, (tip + hx * 2f - hy * 2f).Y, (tip + hx * 2f - hy * 2f).Z, 1f, 1f,
+            (tip - hy * 2f).X, (tip - hy * 2f).Y, (tip - hy * 2f).Z, 0f, 1f,
+        };
+
+        var mapped = _context!.Map(_cursorVertexBuffer!, MapMode.WriteDiscard, Vortice.Direct3D11.MapFlags.None);
+        try
+        {
+            fixed (float* p = data)
+            {
+                var bytes = new ReadOnlySpan<byte>(p, data.Length * sizeof(float));
+                bytes.CopyTo(new Span<byte>((void*)mapped.DataPointer, bytes.Length));
+            }
+        }
+        finally
+        {
+            _context.Unmap(_cursorVertexBuffer!, 0);
+        }
     }
 
     /// <summary>
@@ -1083,6 +1425,18 @@ public sealed class PanelRenderer : IDisposable
 
     private void Cleanup()
     {
+        _cursorSrv?.Dispose();
+        _cursorSrv = null;
+        _cursorTexture?.Dispose();
+        _cursorTexture = null;
+        _cursorBlendState?.Dispose();
+        _cursorBlendState = null;
+        _cursorDepthState?.Dispose();
+        _cursorDepthState = null;
+        _cursorPixelShader?.Dispose();
+        _cursorPixelShader = null;
+        _cursorVertexBuffer?.Dispose();
+        _cursorVertexBuffer = null;
         _sampler?.Dispose();
         _sampler = null;
         _rasterizer?.Dispose();

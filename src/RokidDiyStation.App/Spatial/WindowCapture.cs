@@ -134,6 +134,20 @@ public sealed class WindowCapture : IDisposable
         // on Windows 11 21H2 and later.
         TrySetIsBorderRequired(session, false);
 
+        // Do NOT bake the OS cursor into the captured frame.
+        //
+        // IsCursorCaptureEnabled DEFAULTS TO TRUE, and when the source
+        // window is on the same display as our panel, DWM composites
+        // the system cursor into the captured texture.  The result is a
+        // ghost cursor - scaled to 50 %, perspective-distorted, lagging,
+        // and permanently burnt into the panel - which is exactly the
+        // artifact the virtual 3D cursor exists to replace.
+        //
+        // With the cursor suppressed over the glasses' display, there
+        // is no OS arrow to capture anyway; setting this false makes
+        // that explicit and removes the ghost for good.
+        TrySetIsCursorCaptureEnabled(session, false);
+
         // Windows 11 24H2 (build 26100) throttles unconfigured WGC
         // sessions to 60 Hz.  Ask for the full rate so the capture
         // keeps up with the glasses' panel.
@@ -276,6 +290,33 @@ public sealed class WindowCapture : IDisposable
         {
             // The property is not settable on this build.  The border
             // stays; nothing we can do about it.
+        }
+    }
+
+    /// <summary>
+    /// Stop baking the OS cursor into the captured frame, where the OS
+    /// supports it.
+    /// </summary>
+    /// <remarks>
+    /// IsCursorCaptureEnabled exists from Windows 10 1803 onwards, so
+    /// it is always present on the builds we target; the probe is
+    /// belt-and-braces, and a failure is not fatal (the only symptom
+    /// would be a ghost cursor in the panel).
+    /// </remarks>
+    private static void TrySetIsCursorCaptureEnabled(GraphicsCaptureSession session, bool enabled)
+    {
+        try
+        {
+            if (Windows.Foundation.Metadata.ApiInformation.IsPropertyPresent(
+                    "Windows.Graphics.Capture.GraphicsCaptureSession", "IsCursorCaptureEnabled"))
+            {
+                session.IsCursorCaptureEnabled = enabled;
+            }
+        }
+        catch
+        {
+            // Not settable on this build; the cursor may appear baked
+            // into the capture.  Not fatal.
         }
     }
 
