@@ -347,7 +347,7 @@ public sealed class TrayApplicationContext
 
         // The window appears a moment after the process starts, so this
         // runs on a worker thread and pins the window when it shows up.
-        _ = Task.Run(async () =>
+        _ = Task.Run(() =>
         {
             try
             {

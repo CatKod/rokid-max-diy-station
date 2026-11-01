@@ -68,7 +68,6 @@ namespace RokidDiyStation.App.Input;
 public sealed class SpatialInputCoordinator : IDisposable
 {
     private readonly Func<(int Width, int Height)> _captureSizeProvider;
-    private readonly Action<string> _log;
 
     private readonly BrowserInputRouter _router = new();
     private readonly CancellationTokenSource _cts = new();
@@ -704,7 +703,6 @@ public sealed class SpatialInputCoordinator : IDisposable
     private void Log(string line)
     {
         try { OnLog?.Invoke(line); } catch { }
-        try { _log?.Invoke(line); } catch { }
     }
 
     private sealed record PendingAction(Func<CancellationToken, Task> Run);
