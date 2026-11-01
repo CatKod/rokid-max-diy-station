@@ -101,23 +101,45 @@ public static class AppLauncher
     /// </remarks>
     public static IReadOnlyList<DriveableApp> KnownApps()
     {
-        var candidates = new[]
+        // The paths are built from the LOCAL APP DATA and the PROGRAM
+        // FILES folders rather than written out, because the user
+        // profile's name is part of the path and a hard-coded one
+        // would only ever work on the machine it was written on.
+        var local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var roaming = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+
+        var candidates = new List<DriveableApp>
         {
             new DriveableApp("Visual Studio Code",
-                @"C:\Users\kimvi\AppData\Local\Programs\Microsoft VS Code\Code.exe"),
+                Path.Combine(local, "Programs", "Microsoft VS Code", "Code.exe")),
             new DriveableApp("Visual Studio Code",
-                @"C:\Program Files\Microsoft VS Code\Code.exe"),
+                Path.Combine(programFiles, "Microsoft VS Code", "Code.exe")),
             new DriveableApp("Notion",
-                @"C:\Users\kimvi\AppData\Local\Programs\Notion\Notion.exe"),
+                Path.Combine(local, "Programs", "Notion", "Notion.exe")),
             new DriveableApp("Discord",
-                @"C:\Users\kimvi\AppData\Local\Programs\discord\Discord.exe"),
+                Path.Combine(local, "Programs", "discord", "Discord.exe")),
             new DriveableApp("Obsidian",
-                @"C:\Users\kimvi\AppData\Local\Programs\Obsidian\Obsidian.exe"),
+                Path.Combine(local, "Programs", "Obsidian", "Obsidian.exe")),
             new DriveableApp("Slack",
-                @"C:\Users\kimvi\AppData\Local\Programs\Slack\slack.exe"),
+                Path.Combine(local, "Programs", "Slack", "slack.exe")),
             new DriveableApp("Spotify",
-                @"C:\Users\kimvi\AppData\Roaming\Spotify\Spotify.exe"),
+                Path.Combine(roaming, "Spotify", "Spotify.exe")),
+            new DriveableApp("Telegram",
+                Path.Combine(roaming, "Telegram Desktop", "Telegram.exe")),
+            new DriveableApp("Figma",
+                Path.Combine(local, "Figma", "Figma.exe")),
         };
+
+        // The 32-bit Program Files folder is where a lot of software
+        // still lands, and where a machine without the 64-bit one puts
+        // everything.
+        if (!string.IsNullOrEmpty(programFilesX86))
+        {
+            candidates.Add(new DriveableApp("Visual Studio Code",
+                Path.Combine(programFilesX86, "Microsoft VS Code", "Code.exe")));
+        }
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<DriveableApp>();
