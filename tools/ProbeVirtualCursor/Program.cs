@@ -15,8 +15,9 @@
 // Everything below the CDP call has been proven by unit tests and by
 // a headless end-to-end test.  What has NOT been proven is the part
 // that needs the real machine: the low-level hook, the ray-cast
-// re-seed against the real panel pose, and the mapping onto a real
-// browser sitting behind the AR panel.
+// re-seed against the real panel pose, the mapping onto a real
+// browser sitting behind the AR panel, and the 3D cursor actually
+// being DRAWN on the panel.
 //
 // The probe does not need the user to wear the glasses and to report
 // what they see.  It drives the mouse with SendInput - which is
@@ -26,14 +27,17 @@
 // Method
 // ------
 //  1. Launch a browser with a recorder page, and pin it.
-//  2. Anchor the panel, and feed the real IMU, so the panel has a
-//     real pose in the room.
+//  2. Anchor the panel, and feed the IMU, so the panel has a real
+//     pose in the room.
 //  3. Move the PHYSICAL mouse onto the glasses' display with
 //     SendInput.  That crosses the display boundary, which is what
 //     triggers the re-seed.
 //  4. Move it further, so the differential mapping advances the
 //     cursor.
 //  5. Click, and read back what the renderer saw.
+//  6. Scroll, and read back what the renderer saw.
+//  7. Snapshot the panel's back buffer and check that the 3D cursor
+//     is actually drawn on it.
 //
 // The one thing the probe cannot check is whether the click landed
 // where the user THINKS it should - that is a question about the
@@ -85,6 +89,7 @@ internal static class Program
     private const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
     private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_WHEEL = 0x0800;
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint n, INPUT[] inputs, int size);
@@ -103,14 +108,16 @@ internal static class Program
         <html><head><meta charset="utf-8"><title>Rokid Virtual Cursor Probe</title>
         <script>
         window.__events = [];
-        for (const type of ['mousemove','mousedown','mouseup','click']) {
+        for (const type of ['mousemove','mousedown','mouseup','click','wheel']) {
           window.addEventListener(type, (e) => {
-            window.__events.push({type: type, x: e.clientX, y: e.clientY});
+            window.__events.push({type: type, x: e.clientX, y: e.clientY,
+                                 deltaY: (e.deltaY || 0)});
           }, true);
         }
         </script></head>
         <body style="margin:0">
-        <div style="position:absolute;left:100px;top:50px;width:200px;height:100px;background:#c00"></div>
+        <div id="box" style="position:absolute;left:100px;top:50px;width:200px;height:100px;background:#c00"></div>
+        <div style="height:4000px"></div>
         </body></html>
         """;
 
@@ -288,6 +295,70 @@ internal static class Program
             await Task.Delay(300);
 
             // -------------------------------------------------------------
+            // 4b. The SIGN of the differential mapping
+            // -------------------------------------------------------------
+            //
+            // This is the single most likely thing to get wrong, and the
+            // research flagged it as such.  The policy is "re-seeded
+            // differential": entering the display ray-casts the mouse
+            // pixel onto the panel, and from then on only the mouse's
+            // DELTA moves the cursor.
+            //
+            // So: moving the mouse RIGHT must increase the cursor's u
+            // (which is the viewer's right), and moving it DOWN must
+            // increase v (the viewer's bottom).  If the signs are
+            // inverted, the user drags the cursor the wrong way and the
+            // whole product is unusable.
+            Console.WriteLine();
+            Console.WriteLine("[4b] The direction of the differential mapping");
+
+            var vc = station.Renderer.Cursor;
+            if (vc is null)
+            {
+                failures.Add("the renderer has no virtual cursor");
+            }
+            else
+            {
+                // Re-enter the display so the re-seed is deterministic.
+                MoveMouseTo(bounds.X - 200, centreY);
+                await Task.Delay(500);
+                MoveMouseTo(centreX, centreY);
+                await Task.Delay(500);
+
+                var (u0, v0) = vc.Position;
+                Console.WriteLine($"    cursor at entry     : u={u0:F4} v={v0:F4}");
+
+                // Move RIGHT by 200 display pixels.
+                MoveMouseTo(centreX + 200, centreY);
+                await Task.Delay(500);
+                var (u1, v1) = vc.Position;
+                Console.WriteLine($"    after moving RIGHT  : u={u1:F4} v={v1:F4}  (du={u1 - u0:+0.0000;-0.0000})");
+
+                if (u1 <= u0)
+                    failures.Add($"moving the mouse right did not move the cursor right (u {u0:F4} -> {u1:F4})");
+
+                // Move DOWN by 150 display pixels.
+                MoveMouseTo(centreX + 200, centreY + 150);
+                await Task.Delay(500);
+                var (u2, v2) = vc.Position;
+                Console.WriteLine($"    after moving DOWN   : u={u2:F4} v={v2:F4}  (dv={v2 - v1:+0.0000;-0.0000})");
+
+                if (v2 <= v1)
+                    failures.Add($"moving the mouse down did not move the cursor down (v {v1:F4} -> {v2:F4})");
+
+                // And back LEFT, to prove the cursor is not stuck.
+                MoveMouseTo(centreX, centreY);
+                await Task.Delay(500);
+                var (u3, v3) = vc.Position;
+                Console.WriteLine($"    after moving LEFT   : u={u3:F4} v={v3:F4}  (du={u3 - u2:+0.0000;-0.0000})");
+
+                if (u3 >= u2)
+                    failures.Add($"moving the mouse left did not move the cursor left (u {u2:F4} -> {u3:F4})");
+            }
+
+            Console.WriteLine();
+
+            // -------------------------------------------------------------
             // 5. Click
             // -------------------------------------------------------------
             Console.WriteLine("[5] Clicking");
@@ -323,13 +394,132 @@ internal static class Program
 
             GetCursorPos(out var after);
             Console.WriteLine($"    cursor after        : ({after.x}, {after.y})");
-            Console.WriteLine();
 
+            // -------------------------------------------------------------
+            // 6. Wheel
+            // -------------------------------------------------------------
+            Console.WriteLine();
+            Console.WriteLine("[6] Scrolling");
+            await reader.EvaluateAsync("window.__events=[]");
+
+            Scroll(-120);
+            await Task.Delay(1000);
+
+            recorded = await reader.EvaluateAsync("JSON.stringify(window.__events)");
+            events = JsonNode.Parse(recorded ?? "[]")!.AsArray();
+            var wheel = events.FirstOrDefault(e => e!["type"]!.GetValue<string>() == "wheel");
+            if (wheel is null)
+            {
+                failures.Add("the wheel never reached the renderer");
+            }
+            else
+            {
+                var delta = wheel["deltaY"]!.GetValue<double>();
+                Console.WriteLine($"    wheel deltaY        : {delta:F0}");
+                if (Math.Abs(delta) < 1)
+                    failures.Add($"the wheel reached the renderer but with no delta: {delta:F0}");
+            }
+
+            // -------------------------------------------------------------
+            // 7. The 3D cursor is drawn on the panel
+            // -------------------------------------------------------------
+            //
+            // The check is a DIFF, not a colour count: the panel shows a
+            // white browser page, so "how many white pixels" says
+            // nothing.  Instead the panel is snapshotted twice - once
+            // with the cursor DORMANT (the pointer is off the glasses'
+            // display) and once with it ACTIVE - and the two images are
+            // compared.  The pixels that changed ARE the cursor.
+            //
+            // The diff also gives the cursor's position on the screen,
+            // which is checked against the projection: the cursor's
+            // world position is projected to NDC and then to screen
+            // pixels, and it has to land on the diff's centre of mass.
+            // That is the objective proof that the 3D cursor and the
+            // click coordinate are the SAME point.
+            Console.WriteLine();
+            Console.WriteLine("[7] The 3D cursor on the panel");
+
+            // 7a. With the cursor dormant.
+            MoveMouseTo(bounds.X - 200, centreY);
+            await Task.Delay(700);
+
+            var dormantPath = Path.Combine(Path.GetTempPath(), "rokid-vcp-dormant.png");
+            if (station.Renderer.SnapshotBackBuffer(dormantPath) is null)
+            {
+                failures.Add("could not snapshot the panel's back buffer");
+            }
+            else
+            {
+                // 7b. With the cursor active.
+                MoveMouseTo(centreX, centreY);
+                await Task.Delay(700);
+
+                var activePath = Path.Combine(Path.GetTempPath(), "rokid-vcp-active.png");
+                if (station.Renderer.SnapshotBackBuffer(activePath) is null)
+                {
+                    failures.Add("could not snapshot the panel's back buffer");
+                }
+                else
+                {
+                    var diff = DiffImages(dormantPath, activePath, out var cx, out var cy, out var changed);
+                    Console.WriteLine($"    changed pixels      : {changed}");
+                    Console.WriteLine($"    cursor at screen    : ({cx}, {cy})");
+
+                    // Keep a copy for the vision check: it is the only
+                    // way to tell whether the panel shows the content
+                    // TWICE (side-by-side stereo) or once.
+                    var keep = Path.Combine(Path.GetTempPath(), "rokid-vcp-final.png");
+                    File.Copy(activePath, keep, true);
+                    Console.WriteLine($"    kept                : {keep}");
+
+                    DescribeLayout(activePath);
+                    DumpAscii(activePath);
+
+                    if (changed < 20)
+                    {
+                        failures.Add(
+                            $"the 3D cursor was not drawn on the panel (only {changed} pixels changed)");
+                    }
+                    else
+                    {
+                        // Where SHOULD it be?  The cursor's texture
+                        // coordinate is projected through the panel's
+                        // pose, exactly as the renderer does it.
+                        var cursor = station.Renderer.Cursor;
+                        if (cursor is not null && cursor.IsActive)
+                        {
+                            var (u, v) = cursor.Position;
+                            var expected = ProjectToScreen(station, u, v, target.Width, target.Height);
+                            Console.WriteLine($"    cursor uv           : ({u:F4}, {v:F4})");
+                            Console.WriteLine($"    expected on screen  : ({expected.X}, {expected.Y})");
+
+                            var dx = Math.Abs(expected.X - cx);
+                            var dy = Math.Abs(expected.Y - cy);
+                            // The cursor's tip is the anchor point, and
+                            // the diff's centre of mass is the middle
+                            // of the arrow, so a small offset is
+                            // expected.  A large one means the cursor
+                            // is drawn somewhere other than where it
+                            // clicks.
+                            if (dx > 40 || dy > 40)
+                            {
+                                failures.Add(
+                                    $"the cursor is drawn at ({cx}, {cy}) but clicks at "
+                                    + $"({expected.X}, {expected.Y})");
+                            }
+                        }
+                    }
+                }
+            }
+
+            Console.WriteLine();
             Console.WriteLine("=== Verdict ===");
             if (failures.Count == 0)
             {
-                Console.WriteLine("    PASS - the physical mouse drove the virtual cursor, and the");
-                Console.WriteLine("           click reached the browser's renderer.");
+                Console.WriteLine("    PASS - the physical mouse drove the virtual cursor, the");
+                Console.WriteLine("           click and the wheel reached the browser's renderer,");
+                Console.WriteLine("           and the 3D cursor is drawn on the panel.");
                 return 0;
             }
 
@@ -343,6 +533,225 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// Compare two panel snapshots and describe what changed.
+    /// </summary>
+    /// <remarks>
+    /// The two images are the same page with and without the virtual
+    /// cursor drawn on it, so every differing pixel is part of the
+    /// cursor.  The centre of mass of the differing pixels is the
+    /// cursor's position on the screen.
+    /// </remarks>
+    /// <param name="before">The snapshot without the cursor.</param>
+    /// <param name="after">The snapshot with the cursor.</param>
+    /// <param name="centreX">The cursor's centre of mass, in pixels.</param>
+    /// <param name="centreY">The cursor's centre of mass, in pixels.</param>
+    /// <param name="changed">How many pixels differ.</param>
+    /// <returns>The number of differing pixels.</returns>
+    private static int DiffImages(string before, string after, out int centreX, out int centreY, out int changed)
+    {
+        centreX = 0;
+        centreY = 0;
+        changed = 0;
+
+        using var a = new System.Drawing.Bitmap(before);
+        using var b = new System.Drawing.Bitmap(after);
+
+        var w = Math.Min(a.Width, b.Width);
+        var h = Math.Min(a.Height, b.Height);
+
+        long sumX = 0;
+        long sumY = 0;
+
+        for (var y = 0; y < h; y++)
+        for (var x = 0; x < w; x++)
+        {
+            var pa = a.GetPixel(x, y);
+            var pb = b.GetPixel(x, y);
+            // A small tolerance: the captured page behind the cursor
+            // is static, but the capture is not perfectly
+            // frame-locked, so an anti-aliased edge can flicker by a
+            // least significant bit.
+            if (Math.Abs(pa.R - pb.R) <= 4 &&
+                Math.Abs(pa.G - pb.G) <= 4 &&
+                Math.Abs(pa.B - pb.B) <= 4)
+                continue;
+
+            changed++;
+            sumX += x;
+            sumY += y;
+        }
+
+        if (changed > 0)
+        {
+            centreX = (int)(sumX / changed);
+            centreY = (int)(sumY / changed);
+        }
+        return changed;
+    }
+
+    /// <summary>
+    /// Where the cursor's texture coordinate lands on the panel's
+    /// back buffer, in pixels.
+    /// </summary>
+    /// <remarks>
+    /// This is the renderer's own maths: the texture coordinate becomes
+    /// a world point on the panel's plane, and that point is projected
+    /// through the view and projection matrices into NDC and then into
+    /// the back buffer's pixels.
+    ///
+    /// The buffer's size has to be the ACTUAL one, not the glasses'
+    /// nominal 1920x1080: the driver can put the display in a
+    /// side-by-side 3840x1080 mode, and the renderer sizes its
+    /// swapchain to whatever the display currently is.
+    /// </remarks>
+    private static (int X, int Y) ProjectToScreen(SpatialStation station, float u, float v, int bufferWidth, int bufferHeight)
+    {
+        var view = station.Anchor.GetView();
+        var pose = view.PanelPose;
+        var projection = station.Anchor.GetProjection();
+
+        var world = RokidDiyStation.Core.Spatial.PanelPointer.FromUv(u, v, pose);
+        var clip = Vector4.Transform(new Vector4(world, 1f), view.View * projection);
+
+        if (Math.Abs(clip.W) < 1e-6f) return (-1, -1);
+
+        var ndcX = clip.X / clip.W;
+        var ndcY = clip.Y / clip.W;
+
+        var px = (int)Math.Round((ndcX * 0.5f + 0.5f) * bufferWidth);
+        var py = (int)Math.Round((0.5f - ndcY * 0.5f) * bufferHeight);
+        return (px, py);
+    }
+
+    /// <summary>
+    /// Describe what is actually on the panel.
+    /// </summary>
+    /// <remarks>
+    /// The Rokid Max has two Micro-OLED panels side by side, so the PC
+    /// sees the glasses as ONE 3840x1080 monitor - 1920x1080 per eye.
+    ///
+    /// That raises a question the numbers alone cannot answer: is the
+    /// content drawn ONCE across the whole 3840 (so each eye sees a
+    /// squashed, half-width copy), or is it drawn ONCE PER EYE (the
+    /// side-by-side stereo layout)?
+    ///
+    /// The signature of side-by-side stereo is that the LEFT half is a
+    /// MIRROR of the right half.  If it is not, the content is drawn
+    /// once across the full width, and the user is looking at a
+    /// horizontally squashed image.
+    /// </remarks>
+    private static void DescribeLayout(string path)
+    {
+        using var bmp = new System.Drawing.Bitmap(path);
+        Console.WriteLine($"    panel buffer        : {bmp.Width}x{bmp.Height}");
+
+        long leftLit = 0, rightLit = 0;
+        for (var y = 0; y < bmp.Height; y++)
+        for (var x = 0; x < bmp.Width; x++)
+        {
+            var c = bmp.GetPixel(x, y);
+            if (c.R <= 16 && c.G <= 16 && c.B <= 16) continue;
+            if (x < bmp.Width / 2) leftLit++; else rightLit++;
+        }
+        Console.WriteLine($"    lit left / right    : {leftLit} / {rightLit}");
+
+        // Mirror test.
+        int diff = 0, sampled = 0;
+        for (var y = 0; y < bmp.Height; y += 4)
+        for (var x = 0; x < bmp.Width / 2; x += 4)
+        {
+            var a = bmp.GetPixel(x, y);
+            var b = bmp.GetPixel(bmp.Width - 1 - x, y);
+            sampled++;
+            if (Math.Abs(a.R - b.R) > 24 || Math.Abs(a.G - b.G) > 24 || Math.Abs(a.B - b.B) > 24) diff++;
+        }
+        var mirrored = diff < sampled * 0.1;
+        Console.WriteLine($"    mirrored halves?    : {diff}/{sampled} differ -> "
+                          + (mirrored ? "YES - side-by-side stereo" : "NO - one image across the full width"));
+
+        // The probe's page draws a 200x100 red box at (100,50) in CSS
+        // pixels.  Where it lands on the panel says how the content is
+        // scaled.
+        int minX = int.MaxValue, maxX = -1, minY = int.MaxValue, maxY = -1;
+        for (var y = 0; y < bmp.Height; y++)
+        for (var x = 0; x < bmp.Width; x++)
+        {
+            var c = bmp.GetPixel(x, y);
+            if (c.R > 200 && c.G < 80 && c.B < 80)
+            {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+        if (maxX < 0)
+        {
+            Console.WriteLine("    red marker          : not found");
+            return;
+        }
+
+        var boxWidth = maxX - minX + 1;
+        Console.WriteLine($"    red marker          : x {minX}..{maxX}, y {minY}..{maxY}  ({boxWidth}px wide)");
+        Console.WriteLine($"    horizontal scale    : {boxWidth / 200.0:F3}x  (1.000 = the page is 1:1 with the panel)");
+    }
+
+    /// <summary>
+    /// Draw the panel's back buffer as coarse ASCII art.
+    /// </summary>
+    /// <remarks>
+    /// This is the fastest way to see the LAYOUT - where the content
+    /// is, whether it is duplicated, and whether the cursor is where it
+    /// should be - without having to interpret a number.
+    /// </remarks>
+    private static void DumpAscii(string path)
+    {
+        using var bmp = new System.Drawing.Bitmap(path);
+        const int cols = 96;
+        const int rows = 24;
+        var cellW = bmp.Width / (double)cols;
+        var cellH = bmp.Height / (double)rows;
+
+        Console.WriteLine();
+        Console.WriteLine($"    +{new string('-', cols)}+");
+        for (var r = 0; r < rows; r++)
+        {
+            var line = new char[cols];
+            for (var c = 0; c < cols; c++)
+            {
+                var x0 = (int)(c * cellW);
+                var x1 = Math.Min(bmp.Width, (int)((c + 1) * cellW));
+                var y0 = (int)(r * cellH);
+                var y1 = Math.Min(bmp.Height, (int)((r + 1) * cellH));
+
+                double sum = 0;
+                var n = 0;
+                var red = 0;
+                for (var y = y0; y < y1; y += 2)
+                for (var x = x0; x < x1; x += 2)
+                {
+                    var p = bmp.GetPixel(x, y);
+                    sum += (p.R + p.G + p.B) / 3.0;
+                    if (p.R > 140 && p.G < 90 && p.B < 90) red++;
+                    n++;
+                }
+                if (n == 0) { line[c] = ' '; continue; }
+
+                var mean = sum / n;
+                if (red > n * 0.4) line[c] = 'R';
+                else if (mean < 12) line[c] = ' ';
+                else if (mean > 235) line[c] = '#';
+                else if (mean > 150) line[c] = '.';
+                else if (mean > 60) line[c] = ':';
+                else line[c] = '+';
+            }
+            Console.WriteLine($"    |{new string(line)}|");
+        }
+        Console.WriteLine($"    +{new string('-', cols)}+");
+        Console.WriteLine("      ('#' white, '.' light, ':' mid, '+' dark, 'R' red marker, ' ' black)");
+    }
+
     private static void MoveMouseTo(int x, int y)
     {
         SetCursorPos(x, y);
@@ -353,6 +762,19 @@ internal static class Program
         Send(0x0002);
         Thread.Sleep(40);
         Send(0x0004);
+    }
+
+    private static void Scroll(int delta)
+    {
+        var input = new INPUT
+        {
+            type = INPUT_MOUSE,
+            u = new INPUTUNION
+            {
+                mi = new MOUSEINPUT { dwFlags = MOUSEEVENTF_WHEEL, mouseData = unchecked((uint)delta) },
+            },
+        };
+        SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
     }
 
     private static void Send(uint flags)
