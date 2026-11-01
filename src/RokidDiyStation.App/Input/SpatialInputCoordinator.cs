@@ -47,6 +47,7 @@
 // cursor is drawn" can disagree, and keeping one number for both is
 // what makes the cursor and the click agree.
 using System.Collections.Concurrent;
+using System.Text.Json.Nodes;
 using RokidDiyStation.App.Spatial;
 
 namespace RokidDiyStation.App.Input;
@@ -180,6 +181,8 @@ public sealed class SpatialInputCoordinator : IDisposable
 
         if (!await RefreshGeometryAsync(token).ConfigureAwait(false))
             Log("Connected to \"" + target.Title + "\", but the page's metrics are not readable yet.");
+
+        await _router.EnsureActiveAsync(token).ConfigureAwait(false);
 
         Log("Interactive: driving \"" + target.Title + "\" over the DevTools protocol.");
         return true;

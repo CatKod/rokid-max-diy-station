@@ -48,6 +48,22 @@ public sealed class CdpClient : IDisposable
 {
     private ClientWebSocket? _socket;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+
+    /// <summary>
+    /// Serialises the whole send-and-wait cycle.
+    /// </summary>
+    /// <remarks>
+    /// A WebSocket has ONE reader.  If two commands were in flight at
+    /// once, one of them would consume the other's reply and the
+    /// answers would be attributed to the wrong commands - which
+    /// shows up as a click landing in the wrong place, or as a
+    /// command that never completes.
+    ///
+    /// The lock is held across the whole exchange, so the replies come
+    /// back in the order the commands were sent.
+    /// </remarks>
+    private readonly SemaphoreSlim _exchangeLock = new(1, 1);
+
     private int _nextId = 1;
     private volatile bool _closed;
 
@@ -62,6 +78,16 @@ public sealed class CdpClient : IDisposable
 
     /// <summary>True while the connection is usable.</summary>
     public bool IsConnected => _socket is { State: WebSocketState.Open } && !_closed;
+
+    /// <summary>
+    /// The last error the browser reported, for diagnostics.
+    /// </summary>
+    /// <remarks>
+    /// CDP answers a refused command with an error object.  Without
+    /// this property the failure mode is a silent "false", which is
+    /// very hard to diagnose from the outside.
+    /// </remarks>
+    public string? LastError { get; private set; }
 
     /// <summary>
     /// Connect to a page's debug WebSocket.
@@ -97,12 +123,56 @@ public sealed class CdpClient : IDisposable
     /// </summary>
     /// <param name="method">The CDP method name, e.g. "Input.dispatchMouseEvent".</param>
     /// <param name="parameters">The method's parameters.</param>
+    /// <param name="token">A cancellation token.</param>
     /// <returns>True when the browser acknowledged the command.</returns>
-    public async Task<bool> SendAsync(string method, JsonObject? parameters = null, CancellationToken token = default)
+    public Task<bool> SendAsync(
+        string method, JsonObject? parameters = null, CancellationToken token = default)
+        => SendAsync(method, parameters, null, token);
+
+    /// <summary>
+    /// Send a command and wait for its answer.
+    /// </summary>
+    /// <param name="method">The CDP method name, e.g. "Input.dispatchMouseEvent".</param>
+    /// <param name="parameters">The method's parameters.</param>
+    /// <param name="resultReader">
+    /// An optional callback that receives the command's value, if the
+    /// command produced one.
+    /// </param>
+    /// <param name="token">A cancellation token.</param>
+    /// <returns>True when the browser acknowledged the command.</returns>
+    public async Task<bool> SendAsync(
+        string method,
+        JsonObject? parameters,
+        Action<string>? resultReader,
+        CancellationToken token = default)
     {
         var socket = _socket;
-        if (socket is null || socket.State != WebSocketState.Open) return false;
+        if (socket is null || socket.State != WebSocketState.Open)
+        {
+            LastError = $"socket not open (socket={(socket is null ? "null" : socket.State.ToString())}, closed={_closed})";
+            return false;
+        }
 
+        // The whole exchange is serialised: one reader per socket, and
+        // the replies have to be matched to the commands in order.
+        await _exchangeLock.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            return await SendCoreAsync(socket, method, parameters, resultReader, token).ConfigureAwait(false);
+        }
+        finally
+        {
+            _exchangeLock.Release();
+        }
+    }
+
+    private async Task<bool> SendCoreAsync(
+        ClientWebSocket socket,
+        string method,
+        JsonObject? parameters,
+        Action<string>? resultReader,
+        CancellationToken token)
+    {
         var id = Interlocked.Increment(ref _nextId);
         var message = new JsonObject
         {
@@ -133,23 +203,100 @@ public sealed class CdpClient : IDisposable
 
         // Read until we see the answer with our id.  Events and other
         // traffic may arrive in between, so we keep reading.
-        while (true)
-        {
-            var response = await ReceiveAsync(token).ConfigureAwait(false);
-            if (response is null) return false;
+        //
+        // The read is TIMED OUT.  A browser that never answers - the
+        // page navigated away, the tab was closed, the renderer
+        // crashed - would otherwise wedge the caller forever, and the
+        // caller is the input worker that has to stay responsive.
+        using var readCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+        readCts.CancelAfter(ResponseTimeout);
 
-            if (response.TryGetPropertyValue("id", out var idNode)
-                && idNode is not null
-                && idNode.GetValue<int>() == id)
+        try
+        {
+            while (true)
             {
-                // An error response means the browser refused the
-                // command, which is a legitimate answer - the caller
-                // wants to know it did not work.
-                if (response.TryGetPropertyValue("error", out var error) && error is not null)
-                    return false;
-                return true;
+                var response = await ReceiveAsync(readCts.Token).ConfigureAwait(false);
+                if (response is null) return false;
+
+                if (response.TryGetPropertyValue("id", out var idNode)
+                    && idNode is not null
+                    && idNode.GetValue<int>() == id)
+                {
+                    // An error response means the browser refused the
+                    // command, which is a legitimate answer - the caller
+                    // wants to know it did not work.
+                    if (response.TryGetPropertyValue("error", out var error) && error is not null)
+                    {
+                        LastError = error.ToJsonString();
+                        return false;
+                    }
+
+                    // Commands that produce a VALUE carry it in the
+                    // response itself, under "result".
+                    if (resultReader is not null)
+                    {
+                        var value = ExtractResultValue(response);
+                        if (value is not null) resultReader(value);
+                    }
+
+                    return true;
+                }
             }
         }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            // Our own timeout, not the caller's cancellation.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// How long to wait for the browser to answer a command.
+    /// </summary>
+    /// <remarks>
+    /// The browser answers in well under a millisecond on a local
+    /// socket.  Five seconds is generous enough for a loaded machine
+    /// and short enough that a wedged connection does not stall the
+    /// input pipeline.
+    /// </remarks>
+    private static readonly TimeSpan ResponseTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Pull the value out of a command response.
+    /// </summary>
+    /// <remarks>
+    /// The shape is <c>{ "id": N, "result": { "result": { "type": ...,
+    /// "value": ... } } }</c>.  The inner "result" is the remote
+    /// object's description, and its "value" member holds the actual
+    /// value when returnByValue was requested.
+    ///
+    /// A STRING result comes back quoted and escaped - a page that
+    /// returns <c>{"a":1}</c> as a string arrives as
+    /// <c>"{\"a\":1}"</c>.  Parsing that raw text as JSON fails with a
+    /// confusing "invalid start of a property name", so the string is
+    /// unescaped here and the INNER text is returned.  A non-string
+    /// result is returned as its raw JSON.
+    /// </remarks>
+    private static string? ExtractResultValue(JsonObject response)
+    {
+        if (!response.TryGetPropertyValue("result", out var resultNode)
+            || resultNode is not JsonObject result)
+            return null;
+
+        if (!result.TryGetPropertyValue("result", out var innerNode)
+            || innerNode is not JsonObject inner)
+            return null;
+
+        if (!inner.TryGetPropertyValue("value", out var valueNode)
+            || valueNode is null)
+            return null;
+
+        // A string value: return the unescaped inner text.
+        if (valueNode is JsonValue value && value.TryGetValue<string>(out var text))
+            return text;
+
+        // Anything else: the raw JSON.
+        return valueNode.ToJsonString();
     }
 
     /// <summary>
@@ -181,33 +328,14 @@ public sealed class CdpClient : IDisposable
         catch (Exception ex) when (ex is WebSocketException or ObjectDisposedException or OperationCanceledException)
         {
             _closed = true;
+            LastError = "receive: " + ex.GetType().Name + ": " + ex.Message;
             return null;
         }
 
         var text = Encoding.UTF8.GetString(builder.ToArray());
         try
         {
-            var node = JsonNode.Parse(text) as JsonObject;
-            if (node is null) return null;
-
-            // A Runtime.evaluateResult event carries the value we asked
-            // for.  It has no `id`, so it is an EVENT rather than a
-            // command acknowledgement.
-            if (!node.ContainsKey("id")
-                && node.TryGetPropertyValue("method", out var methodNode)
-                && methodNode is not null
-                && methodNode.GetValue<string>() == "Runtime.evaluateResult")
-            {
-                if (node.TryGetPropertyValue("result", out var resultNode)
-                    && resultNode is JsonObject resultObject
-                    && resultObject.TryGetPropertyValue("value", out var valueNode)
-                    && valueNode is not null)
-                {
-                    LastEvaluateResult = valueNode.ToJsonString().Trim('"');
-                }
-            }
-
-            return node;
+            return JsonNode.Parse(text) as JsonObject;
         }
         catch (JsonException)
         {
@@ -216,50 +344,35 @@ public sealed class CdpClient : IDisposable
     }
 
     /// <summary>
-    /// The result of the last Runtime.evaluate, if it produced one.
-    /// </summary>
-    /// <remarks>
-    /// Runtime.evaluate's RESULT does not come back as the command's
-    /// acknowledgement - the acknowledgement only says "the command
-    /// was accepted".  The value arrives as a separate
-    /// Runtime.evaluateResult event on the same socket.
-    ///
-    /// So the client keeps the last event's payload around, and this
-    /// accessor hands it back.  It is a deliberately small amount of
-    /// state: we only need one number out of the page at a time, and a
-    /// full event-routing layer would be a lot of machinery for that.
-    /// </remarks>
-    public string? LastEvaluateResult { get; private set; }
-
-    /// <summary>
     /// Evaluate an expression in the page and return its value.
     /// </summary>
     /// <param name="expression">The JavaScript to evaluate.</param>
     /// <param name="token">A cancellation token.</param>
-    /// <returns>The result's string value, or null on failure.</returns>
+    /// <returns>The result's value, as raw JSON, or null on failure.</returns>
+    /// <remarks>
+    /// The value comes back in the command's RESPONSE, under
+    /// result.result.value - not as a separate event.  That matters:
+    /// waiting for an event that never arrives hangs forever.
+    ///
+    /// The value is returned as raw JSON rather than a parsed string,
+    /// because the caller may want a number, a string or an object.
+    /// </remarks>
     public async Task<string?> EvaluateAsync(string expression, CancellationToken token = default)
     {
-        LastEvaluateResult = null;
+        string? value = null;
 
-        var ok = await SendAsync("Runtime.evaluate", new JsonObject
-        {
-            ["expression"] = expression,
-            ["returnByValue"] = true,
-        }, token).ConfigureAwait(false);
+        var ok = await SendAsync(
+            "Runtime.evaluate",
+            new JsonObject
+            {
+                ["expression"] = expression,
+                ["returnByValue"] = true,
+            },
+            v => value = v,
+            token).ConfigureAwait(false);
 
         if (!ok) return null;
-
-        // The result may already have been consumed by SendAsync's
-        // read loop, or it may still be in flight.  Read until we see
-        // it, or until the socket goes quiet.
-        var deadline = Environment.TickCount64 + 2000;
-        while (LastEvaluateResult is null && Environment.TickCount64 < deadline)
-        {
-            var message = await ReceiveAsync(token).ConfigureAwait(false);
-            if (message is null) break;
-        }
-
-        return LastEvaluateResult;
+        return value;
     }
 
     // -----------------------------------------------------------------
@@ -321,17 +434,35 @@ public sealed class CdpClient : IDisposable
         }, token);
 
     /// <summary>
+    /// Send a raw CDP command and return its JSON result.
+    /// </summary>
+    /// <param name="method">The CDP method name.</param>
+    /// <param name="parameters">The method's parameters.</param>
+    /// <param name="token">A cancellation token.</param>
+    /// <returns>The command's raw result, or null when it failed.</returns>
+    public async Task<string?> SendRawAsync(
+        string method, JsonObject? parameters = null, CancellationToken token = default)
+    {
+        string? value = null;
+        var ok = await SendAsync(method, parameters, v => value = v, token).ConfigureAwait(false);
+        if (!ok) return null;
+        return value ?? "{}";
+    }
+
+    /// <summary>
     /// Turn the mouse wheel.
     /// </summary>
     /// <param name="deltaX">Horizontal wheel delta.</param>
     /// <param name="deltaY">Vertical wheel delta.</param>
-    public Task<bool> MouseWheelAsync(double deltaX, double deltaY, int modifiers = 0, CancellationToken token = default)
+    public Task<bool> MouseWheelAsync(
+        double x, double y, double deltaY, int modifiers = 0, CancellationToken token = default)
         => SendAsync("Input.dispatchMouseEvent", new JsonObject
         {
             ["type"] = "mouseWheel",
-            ["x"] = 0,
-            ["y"] = 0,
-            ["deltaX"] = deltaX,
+            ["button"] = "none",
+            ["x"] = x,
+            ["y"] = y,
+            ["deltaX"] = 0,
             ["deltaY"] = deltaY,
             ["modifiers"] = modifiers,
             ["pointerType"] = "mouse",
@@ -370,5 +501,6 @@ public sealed class CdpClient : IDisposable
         try { _socket?.Dispose(); } catch { }
         _socket = null;
         _sendLock.Dispose();
+        _exchangeLock.Dispose();
     }
 }

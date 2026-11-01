@@ -206,6 +206,46 @@ public sealed class BrowserInputRouter : IDisposable
     /// <summary>True while the CDP connection is usable.</summary>
     public bool IsConnected => _client.IsConnected;
 
+    /// <summary>The last CDP error, for diagnostics.</summary>
+    public string? LastError => _client.LastError;
+
+    /// <summary>Send a raw CDP command.</summary>
+    public Task<string?> SendRawAsync(
+        string method, System.Text.Json.Nodes.JsonObject? parameters = null,
+        CancellationToken token = default)
+        => _client.SendRawAsync(method, parameters, token);
+
+    /// <summary>
+    /// Put the page into an active, focused state.
+    /// </summary>
+    /// <remarks>
+    /// Chromium throttles a window it believes is occluded: it stops
+    /// producing frames, and a wheel event sent to such a renderer
+    /// never completes - it waits for the compositor, which is not
+    /// running.  The panel covers the browser, so from Chromium's
+    /// point of view the browser IS occluded.
+    ///
+    /// When we launch the browser ourselves we pass the flags that
+    /// prevent this.  A browser the user started by hand cannot be
+    /// fixed with flags, so we turn the active state back on over the
+    /// protocol instead.  Doing it here - on the router - means both
+    /// paths go through the same code.
+    /// </remarks>
+    public async Task<bool> EnsureActiveAsync(CancellationToken token = default)
+    {
+        var focusOk = await _client.SendRawAsync(
+            "Emulation.setFocusEmulationEnabled",
+            new JsonObject { ["enabled"] = true },
+            token).ConfigureAwait(false);
+
+        var lifeOk = await _client.SendRawAsync(
+            "Page.setWebLifecycleState",
+            new JsonObject { ["state"] = "active" },
+            token).ConfigureAwait(false);
+
+        return focusOk is not null && lifeOk is not null;
+    }
+
     /// <summary>Close the CDP connection and forget the position.</summary>
     public void Disconnect()
     {
@@ -219,6 +259,18 @@ public sealed class BrowserInputRouter : IDisposable
     /// <summary>Connect to a page's debug WebSocket.</summary>
     public Task<bool> ConnectAsync(string webSocketDebuggerUrl, CancellationToken token = default)
         => _client.ConnectAsync(webSocketDebuggerUrl, token);
+
+    /// <summary>
+    /// Evaluate an expression in the page and return its value.
+    /// </summary>
+    /// <remarks>
+    /// This is the same connection the mouse events go over.  A browser
+    /// allows only one DevTools client per target, so opening a second
+    /// connection for a query would either be refused or would steal
+    /// the replies belonging to the mouse commands.
+    /// </remarks>
+    public Task<string?> EvaluateAsync(string expression, CancellationToken token = default)
+        => _client.EvaluateAsync(expression, token);
 
     /// <summary>
     /// Read the page's viewport metrics.
@@ -278,6 +330,8 @@ public sealed class BrowserInputRouter : IDisposable
             token).ConfigureAwait(false);
         if (value is null) return null;
 
+        // The expression returns a JSON STRING, so the value arrives
+        // unescaped and is parsed as JSON here.
         try
         {
             var node = JsonNode.Parse(value);
@@ -391,6 +445,13 @@ public sealed class BrowserInputRouter : IDisposable
     /// expects pixels, so the 120 is scaled by the usual 1/120 of a
     /// line = 100 px convention, which is what Chromium itself uses.
     /// </param>
+    /// <remarks>
+    /// The wheel event is dispatched AT THE CURSOR.  Chromium routes
+    /// the wheel to whatever is under the pointer, and a wheel event at
+    /// (0, 0) would land on the top-left corner of the page instead of
+    /// under the user's cursor - and would not scroll the element the
+    /// user is actually pointing at.
+    /// </remarks>
     public async Task<bool> ScrollAsync(int delta, int modifiers, CancellationToken token = default)
     {
         if (delta == 0) return true;
@@ -398,7 +459,7 @@ public sealed class BrowserInputRouter : IDisposable
         await _dispatchLock.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            return await _client.MouseWheelAsync(0, delta, modifiers, token).ConfigureAwait(false);
+            return await _client.MouseWheelAsync(_lastX, _lastY, delta, modifiers, token).ConfigureAwait(false);
         }
         finally
         {
