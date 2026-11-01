@@ -141,6 +141,69 @@ public class ViewportMappingTests
     }
 
     [Fact]
+    public void TheRatioThatBuildsTheViewportIsTheRatioThatConvertsIt()
+    {
+        // THE REGRESSION TEST FOR A REAL BUG.
+        //
+        // The viewport rectangle is measured in DEVICE pixels, and CDP's
+        // mouse coordinates are CSS pixels, so the conversion divides
+        // by the device pixel ratio.  If the ratio used to BUILD the
+        // viewport and the ratio used to CONVERT it are different
+        // numbers, every click lands in the wrong place.
+        //
+        // That is exactly what happened: the viewport was built with
+        // the ratio read from the page (1.25), but the conversion read
+        // the ratio from the GEOMETRY, which is null on the path where
+        // the window's geometry is unknown.  The conversion then used
+        // 1.0, and every coordinate came out 25% too large on a
+        // 125%-scaled display.
+        //
+        // The invariant being asserted: for any ratio, the CSS
+        // coordinate of the texture space's corner must equal the
+        // page's own CSS size.  The viewport was built from
+        // innerWidth/innerHeight, so that is the ground truth.
+        foreach (var dpr in new[] { 1.0, 1.25, 1.5, 2.0 })
+        {
+            var geometry = MakeGeometry();
+            geometry.DevicePixelRatio = dpr;
+
+            // A page whose CSS viewport is smaller than the capture,
+            // because the display scales it.
+            var innerWidthCss = 1280;
+            var innerHeightCss = 720;
+
+            var viewport = geometry.ComputeViewport(innerWidthCss, innerHeightCss);
+
+            // The ratio the router OWNS is the one read from the page.
+            // The conversion must use that same number.
+            Assert.True(viewport.ToCss(1f, 1f, dpr, out var x, out var y));
+            Assert.Equal((double)innerWidthCss, x, 3);
+            Assert.Equal((double)innerHeightCss, y, 3);
+        }
+    }
+
+    [Fact]
+    public void TheRoundTripThroughTheMappingIsLossless()
+    {
+        // The cursor is drawn at a texture coordinate and the click is
+        // delivered at a CSS coordinate, so the two mappings have to be
+        // inverses of each other.  If they are not, the arrow lies
+        // about where the click will land.
+        var geometry = MakeGeometry();
+        geometry.DevicePixelRatio = 1.25;
+
+        var viewport = geometry.ComputeViewport(1280, 720);
+
+        foreach (var (cssX, cssY) in new[] { (0.0, 0.0), (200.0, 100.0), (640.0, 360.0), (1279.0, 719.0) })
+        {
+            Assert.True(viewport.ToContent(cssX, cssY, 1.25, out var u, out var v));
+            Assert.True(viewport.ToCss(u, v, 1.25, out var backX, out var backY));
+            Assert.Equal(cssX, backX, 3);
+            Assert.Equal(cssY, backY, 3);
+        }
+    }
+
+    [Fact]
     public void AViewportOffsetByACaptionBarIsAccountedFor()
     {
         // A window with a 30-pixel title bar: the client area starts

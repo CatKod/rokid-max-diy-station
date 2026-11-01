@@ -236,6 +236,35 @@ public sealed class BrowserInputRouter : IDisposable
     private bool _rightDown;
     private bool _middleDown;
 
+    /// <summary>
+    /// The page's device pixel ratio, as read from the page itself.
+    /// </summary>
+    /// <remarks>
+    /// The router OWNS this value, and every conversion uses it.  That
+    /// is not tidiness - it is correctness.
+    ///
+    /// The viewport rectangle is measured in DEVICE pixels (it has to
+    /// be, because it describes a region of the captured image), while
+    /// CDP's mouse coordinates are CSS pixels.  So the conversion
+    /// divides by the device pixel ratio.
+    ///
+    /// If the ratio used to BUILD the viewport and the ratio used to
+    /// CONVERT it could differ, every click would be off by that
+    /// factor.  They used to: the viewport was built from the ratio
+    /// read from the page, but the conversion read the ratio from
+    /// <see cref="Geometry"/>, which is null on the path where the
+    /// window's geometry is unknown - so the conversion silently used
+    /// 1.0 while the viewport had been built with 1.25.  On a
+    /// 125%-scaled display that put every click 25% of the screen away
+    /// from where the user aimed.
+    ///
+    /// One owner, one value, no possibility of disagreement.
+    /// </remarks>
+    private double _devicePixelRatio = 1.0;
+
+    /// <summary>The page's device pixel ratio, as the router last read it.</summary>
+    public double DevicePixelRatio => _devicePixelRatio;
+
     /// <summary>The geometry the viewport mapping needs.</summary>
     public BrowserWindowGeometry? Geometry { get; set; }
 
@@ -325,6 +354,12 @@ public sealed class BrowserInputRouter : IDisposable
         if (raw is null) return false;
 
         var (innerWidth, innerHeight, dpr) = raw.Value;
+
+        // The router takes ownership of the ratio here, so the value
+        // that scales the viewport and the value that converts back to
+        // CSS pixels are the same number by construction.
+        _devicePixelRatio = dpr;
+
         Geometry = new BrowserWindowGeometry
         {
             Handle = Geometry.Handle,
@@ -361,6 +396,11 @@ public sealed class BrowserInputRouter : IDisposable
         if (raw is null) return false;
 
         var (innerWidth, innerHeight, dpr) = raw.Value;
+
+        // As in RefreshMetricsAsync: the router owns the ratio, so the
+        // viewport that is built here and the conversions that read it
+        // back can never use different numbers.
+        _devicePixelRatio = dpr;
 
         _viewport = new ViewportRect(
             0, 0,
@@ -433,7 +473,7 @@ public sealed class BrowserInputRouter : IDisposable
     /// </summary>
     public async Task<bool> HoverAsync(float u, float v, int modifiers, CancellationToken token = default)
     {
-        if (!_viewport.ToCss(u, v, Geometry?.DevicePixelRatio ?? 1.0, out var x, out var y))
+        if (!_viewport.ToCss(u, v, _devicePixelRatio, out var x, out var y))
             return false;
 
         if (_havePosition && x == _lastX && y == _lastY) return true;
@@ -460,7 +500,7 @@ public sealed class BrowserInputRouter : IDisposable
         PointerButton button, bool isDown, float u, float v, int modifiers, int clickCount = 1,
         CancellationToken token = default)
     {
-        if (!_viewport.ToCss(u, v, Geometry?.DevicePixelRatio ?? 1.0, out var x, out var y))
+        if (!_viewport.ToCss(u, v, _devicePixelRatio, out var x, out var y))
             return false;
 
         var name = button switch

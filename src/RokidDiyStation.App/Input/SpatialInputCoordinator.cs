@@ -143,8 +143,17 @@ public sealed class SpatialInputCoordinator : IDisposable
     /// <param name="x">The CSS x coordinate.</param>
     /// <param name="y">The CSS y coordinate.</param>
     /// <returns>True when the mapping is available.</returns>
+    /// <remarks>
+    /// The device pixel ratio comes from the ROUTER, not from the
+    /// geometry.  The router is the component that read the ratio from
+    /// the page and built the viewport with it, so asking it is the
+    /// only way to be sure the two sides of the conversion agree.
+    /// Reading it from the geometry instead silently used 1.0 when
+    /// the geometry was unknown, which inflated every coordinate by the
+    /// ratio on a scaled display.
+    /// </remarks>
     public bool ToCss(float u, float v, out double x, out double y)
-        => _router.Viewport.ToCss(u, v, _router.Geometry?.DevicePixelRatio ?? 1.0, out x, out y);
+        => _router.Viewport.ToCss(u, v, _router.DevicePixelRatio, out x, out y);
 
     /// <summary>
     /// Map a CSS pixel back into a texture coordinate.
@@ -155,7 +164,7 @@ public sealed class SpatialInputCoordinator : IDisposable
     /// <param name="v">Vertical texture coordinate, 0 at the viewer's top.</param>
     /// <returns>True when the mapping is available.</returns>
     public bool ToContent(double cssX, double cssY, out float u, out float v)
-        => _router.Viewport.ToContent(cssX, cssY, _router.Geometry?.DevicePixelRatio ?? 1.0, out u, out v);
+        => _router.Viewport.ToContent(cssX, cssY, _router.DevicePixelRatio, out u, out v);
 
     // -----------------------------------------------------------------
     // Attaching
