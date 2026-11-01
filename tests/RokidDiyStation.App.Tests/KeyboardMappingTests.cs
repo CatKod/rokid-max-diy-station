@@ -181,4 +181,66 @@ public class KeyboardMappingTests
         var control = new ResolvedKey("Control", "ControlLeft", null, 0x11, IsDown: true, false, false, 1);
         Assert.Equal("rawKeyDown", BrowserInputRouter.KeyEventType(control));
     }
+
+    [Fact]
+    public void AKeystrokeIsTakenAwayFromTheFocusedApplicationOnlyWhileCapturing()
+    {
+        // THE REGRESSION TEST FOR THE DOUBLE-TYPING BUG.
+        //
+        // The projected application is a REAL window and it usually
+        // holds the OS focus, because our panel never takes focus.  So
+        // a keystroke reaches it twice: natively through the
+        // operating system's own input queue, and over the DevTools
+        // protocol.  We measured that against VS Code - one physical
+        // key press produced keydown, keypress, keydown, keypress,
+        // keyup, keyup.
+        //
+        // The native copy is the one with the EMPTY `code`, because
+        // the native path does not fill that field in.
+        //
+        // So while the glasses are capturing, the hook MUST take the
+        // key away from the operating system.
+        using var keyboard = new KeyboardInput
+        {
+            HasDeliveryTarget = () => true,
+        };
+
+        keyboard.IsCapturing = true;
+        Assert.True(keyboard.ShouldSwallow(),
+            "the keystroke must be taken away from the focused application, or it is delivered twice");
+
+        // Outside the capture the user's real typing has to reach
+        // whatever they were typing into.
+        keyboard.IsCapturing = false;
+        Assert.False(keyboard.ShouldSwallow(),
+            "the keystroke must not be taken away when the glasses are not capturing");
+    }
+
+    [Fact]
+    public void AKeystrokeIsNotTakenAwayWhenThereIsNowhereToDeliverIt()
+    {
+        // The safety net: if the projected window is not interactive,
+        // swallowing the key would make the user's typing go NOWHERE,
+        // which is far worse than a duplicate character.
+        using var keyboard = new KeyboardInput
+        {
+            HasDeliveryTarget = () => false,
+        };
+
+        keyboard.IsCapturing = true;
+        Assert.False(keyboard.ShouldSwallow(),
+            "the keystroke must still reach the focused application when there is no protocol target");
+    }
+
+    [Fact]
+    public void WithoutADeliveryTargetTheKeyIsStillTakenAway()
+    {
+        // No target check means "no information", and the default is
+        // to take the key away - because the double character is the
+        // bug we are fixing, and a missing destination is the
+        // situation where the user's attention is on the glasses.
+        using var keyboard = new KeyboardInput();
+        keyboard.IsCapturing = true;
+        Assert.True(keyboard.ShouldSwallow());
+    }
 }

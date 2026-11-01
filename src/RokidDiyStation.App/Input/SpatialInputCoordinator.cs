@@ -150,6 +150,58 @@ public sealed class SpatialInputCoordinator : IDisposable
     public ViewportRect Viewport => _router.Viewport;
 
     /// <summary>
+    /// Raised for every key event that goes over the wire.
+    /// </summary>
+    /// <remarks>
+    /// A keystroke that arrives twice is invisible from the outside -
+    /// the application just shows two characters - so seeing exactly
+    /// what was dispatched is what makes the bug findable.
+    /// </remarks>
+    public event Action<string>? OnKeyDispatched
+    {
+        add => _router.OnKeyDispatched += value;
+        remove => _router.OnKeyDispatched -= value;
+    }
+
+    /// <summary>
+    /// Evaluate an expression in the projected application.
+    /// </summary>
+    /// <remarks>
+    /// This runs over the SAME connection the input goes over, so it
+    /// has to be queued like the input is: a second concurrent client
+    /// on the same target would either be refused or would steal the
+    /// replies belonging to the mouse commands.
+    ///
+    /// It exists for the diagnostics - "what does the application think
+    /// its own layout is?" - which is the only way to get GROUND
+    /// TRUTH about where a target is, rather than guessing.  A probe
+    /// uses it to ask the application where its own search box is, and
+    /// then aims the virtual cursor at exactly that.
+    /// </remarks>
+    /// <param name="expression">The JavaScript to evaluate.</param>
+    /// <returns>The result, or null when it could not be evaluated.</returns>
+    public Task<string?> EvaluateAsync(string expression)
+    {
+        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        _actions.Enqueue(new PendingAction(async ct =>
+        {
+            try
+            {
+                tcs.TrySetResult(await _router.EvaluateAsync(expression, ct).ConfigureAwait(false));
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetResult(null);
+                Log("Evaluate failed: " + ex.Message);
+            }
+        }));
+        _signal.Release();
+
+        return tcs.Task;
+    }
+
+    /// <summary>
     /// Map a texture coordinate to the page's CSS pixels.
     /// </summary>
     /// <param name="u">Horizontal texture coordinate, 0 at the viewer's left.</param>

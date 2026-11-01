@@ -181,6 +181,14 @@ public sealed class CdpClient : IDisposable
             ["params"] = parameters ?? new JsonObject(),
         };
 
+        // A trace of EVERY key event that goes over the wire, including
+        // the ones sent outside KeyEventAsync.  A keystroke that
+        // arrives twice is invisible from the outside - the application
+        // just shows two characters - so seeing exactly what went out
+        // is what makes the bug findable.
+        if (method == "Input.dispatchKeyEvent")
+            OnKeyDispatched?.Invoke(message.ToJsonString());
+
         var payload = Encoding.UTF8.GetBytes(message.ToJsonString());
 
         try
@@ -502,7 +510,7 @@ public sealed class CdpClient : IDisposable
     /// <param name="autoRepeat">True when this is a key repeat.</param>
     /// <param name="isKeypad">True for the numeric keypad.</param>
     /// <param name="location">0 = standard, 1 = left, 2 = right, 3 = numpad.</param>
-    public Task<bool> KeyEventAsync(
+    public async Task<bool> KeyEventAsync(
         string type,
         string key,
         string code,
@@ -547,8 +555,21 @@ public sealed class CdpClient : IDisposable
                 : unmodifiedText;
         }
 
-        return SendAsync("Input.dispatchKeyEvent", parameters, token);
+        var ok = await SendAsync("Input.dispatchKeyEvent", parameters, token).ConfigureAwait(false);
+        return ok;
     }
+
+    /// <summary>
+    /// Raised for every key event that is dispatched.
+    /// </summary>
+    /// <remarks>
+    /// This is a diagnostic hook: the double-typing bug - a keystroke
+    /// that arrives twice - is invisible from the outside, because the
+    /// application simply shows two characters.  Being able to see the
+    /// exact shape of what went over the wire is what makes the bug
+    /// findable.
+    /// </remarks>
+    public event Action<string>? OnKeyDispatched;
 
     /// <summary>
     /// Send a character as a "char" event.

@@ -156,6 +156,12 @@ public sealed class SpatialStation : IDisposable
         };
         _keyboardInput.OnLog += line => Log(line);
 
+        // A keystroke is only taken away from the focused application
+        // when it is actually going to be delivered over the protocol.
+        // Swallowing it without a destination would make the user's
+        // typing go nowhere.
+        _keyboardInput.HasDeliveryTarget = () => _input?.IsInteractive ?? false;
+
         // The input coordinator: the bridge from the virtual cursor to
         // the projected application.  It owns a worker thread, because
         // every CDP call is a WebSocket round trip and the render

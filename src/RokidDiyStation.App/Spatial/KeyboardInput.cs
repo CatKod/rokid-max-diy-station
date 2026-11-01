@@ -146,6 +146,87 @@ public sealed class KeyboardInput : IDisposable
     /// </remarks>
     public bool IsCapturing { get; set; }
 
+    /// <summary>
+    /// Whether a captured keystroke is taken away from the focused
+    /// application.
+    /// </summary>
+    /// <remarks>
+    /// This has to be TRUE, and the reason is the double-typing bug.
+    ///
+    /// The projected application - VS Code, a browser - is a REAL
+    /// WINDOW on the desktop, and it usually has the OS focus,
+    /// because the panel never takes focus (it is WS_EX_NOACTIVATE).
+    /// So a keystroke the user makes while working in the glasses
+    /// reaches that window TWICE:
+    ///
+    ///   * NATIVELY, through the operating system's own input queue,
+    ///     which is why the duplicate arrives with an EMPTY `code` -
+    ///     the native path does not fill that field in; and
+    ///   * over the DevTools protocol, which is the path we control
+    ///     and the one that puts the character where the user's CURSOR
+    ///     is pointing.
+    ///
+    /// The application cannot tell them apart, so it types the
+    /// character twice.  We measured exactly that against VS Code:
+    /// keydown, keypress, keydown, keypress, keyup, keyup for ONE
+    /// physical key press.
+    ///
+    /// So while the glasses are capturing, the hook TAKES the key away
+    /// from the operating system and delivers it over the protocol
+    /// only.  Outside that, the hook does not even look at it, so the
+    /// user's real typing on their other monitor is completely
+    /// unaffected.
+    ///
+    /// This is the same rule the MOUSE hook follows: it swallows the
+    /// event when it is over the glasses' display, because the panel
+    /// window would otherwise receive the same click and dispatch it
+    /// twice.
+    /// </remarks>
+    public bool SwallowWhileCapturing { get; set; } = true;
+
+    /// <summary>
+    /// Whether the keystroke has somewhere to go.
+    /// </summary>
+    /// <remarks>
+    /// A key must only be swallowed when it is actually going to be
+    /// delivered over the protocol.  If the projected window is not
+    /// interactive - no DevTools endpoint, or the attachment has not
+    /// completed - then swallowing the key would make the user's
+    /// typing go NOWHERE, which is far worse than a duplicate
+    /// character.
+    ///
+    /// The station supplies this from the input coordinator's
+    /// connectivity, so the two stay in step.
+    /// </remarks>
+    public Func<bool>? HasDeliveryTarget { get; set; }
+
+    /// <summary>
+    /// Whether a captured keystroke should be taken away from the
+    /// operating system.
+    /// </summary>
+    /// <remarks>
+    /// Two conditions have to hold:
+    ///
+    ///  * the hook is capturing, which means the pointer is over the
+    ///    glasses; and
+    ///  * the keystroke has somewhere to go, which means the projected
+    ///    application is interactive.
+    ///
+    /// The second condition is the safety net: swallowing a key with
+    /// no destination would make the user's typing go nowhere, which
+    /// is worse than a duplicate character.
+    ///
+    /// It is a separate method so it can be tested without a live
+    /// hook - the rule is the whole point of the change, so it should
+    /// be checked, not just hoped for.
+    /// </remarks>
+    public bool ShouldSwallow()
+    {
+        if (!IsCapturing) return false;
+        if (!SwallowWhileCapturing) return false;
+        return HasDeliveryTarget?.Invoke() ?? true;
+    }
+
     /// <summary>Raised for each keystroke, already resolved.</summary>
     public event Action<ResolvedKey>? OnKey;
 
@@ -238,13 +319,36 @@ public sealed class KeyboardInput : IDisposable
                     (int)data.vkCode, (int)data.scanCode, extended, isDown, autoRepeat);
 
                 OnKey?.Invoke(Resolve(e));
+
+                // Take the key away from the operating system.
+                //
+                // The projected application is a real window and it
+                // usually holds the OS focus, because our panel never
+                // takes focus.  So without this, the keystroke would
+                // reach the application TWICE: natively through the
+                // operating system's own input queue, and over the
+                // DevTools protocol.  The native copy arrives with an
+                // empty `code`, which is how we identified it.
+                //
+                // The application types the character twice.
+                //
+                // Returning 1 tells the system the key was handled and
+                // the event must not travel any further down the chain.
+                // Outside the capture the hook does not even look at
+                // the event, so the user's real typing on their other
+                // monitor is untouched.
+                //
+                // The key is only taken when it is actually going to
+                // be delivered over the protocol.  Swallowing it
+                // without a destination would make the user's typing
+                // go nowhere, which is worse than a duplicate.
+                if (ShouldSwallow())
+                    return new IntPtr(1);
             }
         }
 
-        // Never swallow the event.  The user's real typing must keep
-        // working on the other displays: the hook only OBSERVES.
-        // (The projected app receives its keystrokes over the DevTools
-        // protocol, on a separate channel.)
+        // Not captured: the key belongs to whatever the user was
+        // typing into.
         return CallNextHookExNative(_hook, nCode, wParam, lParam);
     }
 

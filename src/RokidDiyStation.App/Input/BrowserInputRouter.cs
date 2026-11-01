@@ -274,6 +274,21 @@ public sealed class BrowserInputRouter : IDisposable
     /// <summary>The last CDP error, for diagnostics.</summary>
     public string? LastError => _client.LastError;
 
+    /// <summary>
+    /// Raised for every key event that goes over the wire.
+    /// </summary>
+    /// <remarks>
+    /// The double-typing bug - a keystroke that arrives twice - is
+    /// invisible from the outside, because the application simply shows
+    /// two characters.  Seeing the exact shape of what was dispatched
+    /// is what makes it findable.
+    /// </remarks>
+    public event Action<string>? OnKeyDispatched
+    {
+        add => _client.OnKeyDispatched += value;
+        remove => _client.OnKeyDispatched -= value;
+    }
+
     /// <summary>Send a raw CDP command.</summary>
     public Task<string?> SendRawAsync(
         string method, System.Text.Json.Nodes.JsonObject? parameters = null,
