@@ -509,7 +509,54 @@ all.
 
 ---
 
-## 7. Empirical experiments to run
+## 7. Verification results (2026-11-01, real Rokid Max)
+
+Every stage above was built and then measured on the actual hardware, not
+argued about. The glasses were plugged in as `\\.\DISPLAY5` (3840x1080) and
+the probes in `tools/` drove the real mouse with `SendInput` — which is
+exactly what a hand on the mouse does to the system.
+
+### The browser chain — `tools/ProbeVirtualCursor`
+
+| Check | Measured | Verdict |
+|---|---|---|
+| Differential gain | 480 mouse px (a quarter of one eye's 1920 px) → cursor moved `0.2500` in `u` | **1:1** — one mouse count, one content pixel |
+| Click accuracy | aimed at CSS `(200, 100)`; the renderer received `(199, 99)` | **1 CSS px** error, `uv` error `0.0003` |
+| Wheel | `deltaY -100` arrived | pass |
+| The cursor is drawn | 180 changed pixels on the back buffer | pass |
+| The cursor's tip | within 1–2 px of the projected position | pass |
+| Stereo | both eyes identical (`518400/518400`), halves mirrored | correct for SBS |
+| Aspect | marker aspect `1.987` for a `200x100` CSS box (`2.000`) | the content is not stretched |
+
+The click accuracy is the decisive measurement: it proves the arrow that was
+**drawn** and the click that was **delivered** are the same point.
+
+### The Electron chain — `tools/ProbeElectronChain`
+
+Real VS Code, launched through `AppLauncher` on port 9223 and pinned:
+
+| Check | Measured | Verdict |
+|---|---|---|
+| Sign of `Δu/Δv` | mouse right → `u` `0.0000 → 0.1042`; mouse down → `v` `0.5000 → 0.6389` | **not inverted** — the likeliest thing to get wrong, and it is right |
+| Click accuracy | target CSS `(400, 300)`; the workbench received `(400, 299)`, `isTrusted=true` | **1 CSS px** error, `uv` error `0.0002` |
+| Keyboard | one physical `H` → `[keydown, keypress, keyup]`, all `isTrusted=true` | **exactly one character**, no duplicate |
+| The OS is untouched | the OS pointer stayed at `(5760, 540)` before and after | the real mouse never jumped |
+
+### The one bug that only real hardware could find
+
+VS Code **typed every character twice**. The cause was not in the CDP code:
+the projected Electron window keeps the OS focus, so a physical keystroke
+reached it along **two** paths at once — natively through the Win32 message
+queue (which carries an empty DOM `code`) and synthetically over CDP.
+
+The fix is in `KeyboardInput.ShouldSwallow()`: the physical key is taken from
+the focused application only when it is genuinely being delivered over the
+protocol (`IsCapturing` **and** `HasDeliveryTarget`). Swallowing without a
+destination would make the user's typing go nowhere.
+
+---
+
+## 8. Empirical experiments to run
 
 These are the things documentation cannot settle:
 
@@ -525,7 +572,7 @@ These are the things documentation cannot settle:
 
 ---
 
-## 8. Sources
+## 9. Sources
 
 - [Extended Window Styles (`WS_EX_TRANSPARENT`, `WS_EX_NOACTIVATE`)](https://learn.microsoft.com/en-us/windows/win32/winmsg/extended-window-styles)
 - [Raymond Chen — *Like the cake, WS_EX_TRANSPARENT is a lie…*](https://devblogs.microsoft.com/oldnewthing/20121217-00/?p=5843)

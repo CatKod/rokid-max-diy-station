@@ -134,6 +134,46 @@ Micro-OLED display, so the window stays put as you move your head.
 - [ ] MSIX / installer (deferred — the exe runs from the build output)
 - [x] Icon (.ico) — generated at build time by `generate-icon.ps1`
 
+## M10 — Input layer stack
+The bridge from the physical mouse and keyboard to whatever is projected.
+
+- [x] `PointerInput` — `WH_MOUSE_LL` hook; swallows only the events over
+      the glasses' display, so the user's other displays are untouched
+- [x] `KeyboardInput` — `WH_KEYBOARD_LL` hook with `ToUnicodeEx`
+      translation, so a Vietnamese/German layout needs no table in our code
+- [x] `SpatialInputCoordinator` — a worker thread owns the CDP round trip,
+      so the render thread never blocks on a WebSocket
+- [x] Multi-port target discovery (9222 browser, 9223 Electron) with
+      candidate scoring, so an open user tab is never hijacked
+- [x] `AppLauncher` — starts VS Code/Notion/Discord/Obsidian/Slack with a
+      DevTools port and a dedicated profile, then pins the window
+- [x] Tray menu entry: "Open an interactive app…"
+- [x] Unit tests: 60 green (`tests/RokidDiyStation.App.Tests/KeyboardMappingTests.cs`)
+
+## M11 — Custom hardware cursor (the virtual 3D pointer)
+A physical mouse drives a cursor drawn *in the 3D scene*, and the click
+lands where that cursor is.
+
+- [x] `WM_SETCURSOR` → `SetCursor(NULL)`: the OS arrow vanishes over the
+      glasses while the mouse stays fully tracked
+- [x] `VirtualCursor` — the cursor's position as `(u, v)` on the panel
+- [x] Cursor quad drawn 1.5 mm in front of the panel (no z-fighting), once
+      per eye for the side-by-side stereo mode
+- [x] Differential tracking — one mouse count moves the cursor one content
+      pixel, the familiar 1:1 feel of an ordinary monitor
+- [x] Re-seed by ray-cast when the pointer enters the glasses' display, so
+      the cursor starts exactly where the mouse is pointing
+- [x] CDP input: move, click, wheel, modifiers, drag
+- [x] The keystroke must not reach the projected app twice — the physical
+      key is swallowed when it is genuinely being delivered over the protocol
+- [x] Keyboard shaping rules (a release is always `keyUp`; Ctrl/Alt suppress
+      the character; the text field is absent, never empty, for a
+      non-printable key)
+- [x] **Hardware verified**: the click landed at CSS `(400, 299)` for a
+      target of `(400, 300)` — a 1 CSS px error — and the workbench of real
+      VS Code received exactly one `keydown/keypress/keyup` for one physical
+      keystroke, all `isTrusted=true`
+
 ## M9 — Niceties
 - [ ] WebSocket emitter (browser/Three.js demo)
 - [ ] CSV/JSON logging of the live pose for offline analysis
