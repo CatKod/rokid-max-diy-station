@@ -52,6 +52,43 @@ public partial class MainWindow : Window
             WindowPickerBox.SelectedItem = selected;
     }
 
+    /// <summary>
+    /// Re-scan the window list every time the dropdown is opened.
+    /// </summary>
+    /// <remarks>
+    /// This is the fix for "the app does not notice new windows".
+    ///
+    /// The list used to be built ONCE, when the settings window was
+    /// created.  So a browser tab opened five minutes after launch was
+    /// simply never in the list — the app could not pin it without a
+    /// restart, which is exactly what the user reported.
+    ///
+    /// The scan happens on <see cref="ComboBox.DropDownOpened"/>
+    /// rather than on a timer, for two reasons:
+    ///
+    ///   * It is exactly as fresh as it needs to be.  The user cannot
+    ///     see a stale list, because the list is rebuilt in the same
+    ///     interaction that shows it.
+    ///
+    ///   * It costs nothing when the user is not choosing a window.
+    ///     Enumerating the windows is not free — it walks the shell's
+    ///     window list — and doing it on a timer would burn CPU for the
+    ///     whole time the app runs, in a background app whose entire
+    ///     point is to stay out of the way.
+    ///
+    /// The tray menu's pin submenu does the same thing on
+    /// <see cref="System.Windows.Controls.ContextMenu.Opened"/>.
+    /// </remarks>
+    private void OnWindowPickerDropDownOpened(object sender, EventArgs e)
+    {
+        RefreshWindowList();
+    }
+
+    private void OnRefreshWindowsClick(object sender, RoutedEventArgs e)
+    {
+        RefreshWindowList();
+    }
+
     private void OnWindowSelected(object sender, SelectionChangedEventArgs e)
     {
         // Selecting a window is not the same as pinning it; the user
@@ -103,7 +140,6 @@ public partial class MainWindow : Window
         SmoothSlider.Value = s.Smoothing;
         FovSlider.Value    = s.FovDegrees;
         FovLabel.Text      = $"{(int)s.FovDegrees}°";
-        MagBox.IsChecked   = s.UseMagnetometer;
         RawPosBox.IsChecked = true;
         AutostartBox.IsChecked = s.Autostart;
         StartMinBox.IsChecked  = s.StartMinimised;
@@ -232,7 +268,6 @@ public partial class MainWindow : Window
             MaxPacketsPerSecond = (int)RateSlider.Value,
             Smoothing = SmoothSlider.Value,
             FovDegrees = FovSlider.Value,
-            UseMagnetometer = MagBox.IsChecked == true,
             Autostart = AutostartBox.IsChecked == true,
             StartMinimised = StartMinBox.IsChecked == true,
             LazyFollowDeadzoneDegrees = LazyFollowSlider.Value,
@@ -245,7 +280,6 @@ public partial class MainWindow : Window
         // having to re-pin or restart.
         _station?.ApplyAnchorOptions(new Core.Spatial.SpatialAnchorOptions
         {
-            UseMagnetometer = next.UseMagnetometer,
             LazyFollowDeadzoneDegrees = (float)Math.Clamp(next.LazyFollowDeadzoneDegrees, 0.0, 45.0),
             LazyFollowRatePerSecond = (float)Math.Clamp(next.LazyFollowRatePerSecond, 0.0, 10.0),
             NeckModelScale = (float)Math.Clamp(next.NeckModelScale, 0.0, 1.0),

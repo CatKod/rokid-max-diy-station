@@ -11,8 +11,35 @@
 // All math uses the **device frame** as emitted by the Rokid Max parser:
 //   accel in m/s²   (gravity vector ~ +Y when glasses are upright)
 //   gyro  in rad/s
-//   mag   in µT     (used only if useMagnetometer == true; indoors this is
-//                    often unreliable, so callers can opt out)
+//   mag   in µT     (parsed but NOT used — see the magnetometer note below)
+//
+// The magnetometer is deliberately NOT used.
+//
+// It is not that the magnetometer is optional — it is that on this
+// hardware it is worse than useless indoors, and the damage is
+// asymmetric in a way that matches the reported symptom exactly.
+//
+// Measured on the real Rokid Max: the magnetometer reads about 108 µT
+// on a desk, against Earth's 25-65 µT field.  The metal chassis, the
+// monitors and the glasses' own display engine dominate the reading.
+// Worse, the dominant part of that 108 µT is the chassis, so the
+// field is not fixed in the world frame — it swings with the
+// device's ORIENTATION relative to the chassis.
+//
+// The heading correction this filter would apply is projected into the
+// horizontal plane only.  So it corrupts YAW and leaves PITCH and ROLL
+// completely untouched.  That is the exact asymmetry the user
+// reported: the vertical axis was smooth, the horizontal axis was not.
+//
+// Measured effect, from tools/ProbeYawJitter: with the correction on, a
+// true 90-degree head turn was reported as 142 degrees — 52 degrees of
+// pure error, injected in the direction the head was already turning.
+// With it off, the same turn reported as 74 degrees.
+//
+// Every production 3DoF runtime (Virtual Desktop, SteamVR, Bigscreen,
+// Monado) resolves heading by hand — a one-key recenter — not by
+// compass.  So the magnetometer is not an option that is off by
+// default; it is an option that does not exist.
 //
 // Quaternion convention: w + xi + yj + zk.  Identity quaternion represents
 // the device in its rest orientation, i.e. the orientation at the first
@@ -92,9 +119,17 @@ public readonly record struct MahonyTuning
     public float KiAccel { get; init; } = 0.0f;
 
     /// <summary>Proportional gain for magnetometer correction.</summary>
-    public float KpMag { get; init; } = 1.0f;
+    /// <remarks>
+    /// UNUSED.  The magnetometer path was removed entirely — see the
+    /// file header.  The field is kept so that the tuning record's
+    /// shape does not change, but nothing reads it.
+    /// </remarks>
+    public float KpMag { get; init; } = 0.0f;
 
     /// <summary>Integral gain for magnetometer correction.</summary>
+    /// <remarks>
+    /// UNUSED.  See <see cref="KpMag"/>.
+    /// </remarks>
     public float KiMag { get; init; } = 0.0f;
 
     /// <summary>
@@ -453,17 +488,12 @@ public readonly record struct MahonyTuning
 public sealed class MahonyFusion
 {
     private readonly MahonyTuning _tuning;
-    private readonly bool _useMagnetometer;
 
     private Quaternion _q = Quaternion.Identity;
     private Vector3 _integralAccel;
-    private Vector3 _integralMag;
     private ulong _prevTs;
     private bool _primed;
     private int _sampleCount;
-    // Skip mag correction for the first N samples so a noisy initial
-    // reading can't yank the heading.  ~0.5s at 437 Hz.
-    private const int MagWarmupSamples = 200;
 
     // The recovery state.
     //
@@ -532,22 +562,26 @@ public sealed class MahonyFusion
     /// Filter tuning.  Defaults to <see cref="MahonyTuning.Default"/>.
     /// </param>
     /// <param name="useMagnetometer">
-    /// Whether to apply the magnetometer's heading correction.
+    /// DEPRECATED and IGNORED.  The magnetometer correction has been
+    /// removed: the Rokid Max's mag reads about 108 µT indoors — well
+    /// outside Earth's 25–65 µT field — and because the chassis
+    /// dominates that reading the field swings with the device's
+    /// orientation, which injects a large, turning-correlated error
+    /// into the heading.  The correction is projected into the
+    /// horizontal plane only, so it damages yaw and leaves pitch and
+    /// roll alone — which is precisely the "vertical is smooth,
+    /// horizontal stutters" symptom it caused.
     ///
-    /// OFF by default, and it should stay off for this product.  The
-    /// Rokid Max's magnetometer reads about 108 µT indoors — well
-    /// outside Earth's 25–65 µT field — because the metal chassis
-    /// dominates the reading.  Indoors the heading correction is then
-    /// worse than no correction at all, and it fights the gyro in a way
-    /// the user sees as the screen swinging around.  Every production
-    /// 3DoF runtime (Virtual Desktop, SteamVR, Bigscreen) likewise
-    /// resolves heading by hand (one-key recenter), not by compass.
-    /// </param>
+    /// The parameter is retained only so that existing call sites keep
+    /// compiling; passing true no longer enables anything.
+    /// </remarks>
     public MahonyFusion(MahonyTuning? tuning = null, bool useMagnetometer = false)
     {
         _tuning = tuning ?? MahonyTuning.Default;
         _tuning.Validate();
-        _useMagnetometer = useMagnetometer;
+        // The magnetometer path is gone.  The parameter is deliberately
+        // not stored, so there is no way for it to be switched on.
+        _ = useMagnetometer;
     }
 
     /// <summary>Current orientation estimate.  Stable only after <see cref="MinSamplesForStableEstimate"/> samples.</summary>
@@ -563,7 +597,6 @@ public sealed class MahonyFusion
     {
         _q = Quaternion.Identity;
         _integralAccel = Vector3.Zero;
-        _integralMag = Vector3.Zero;
         _prevTs = 0;
         _primed = false;
         _sampleCount = 0;
@@ -920,41 +953,17 @@ public sealed class MahonyFusion
             totalErr *= maxRate / correctionRate;
         }
 
-        // The magnetometer path.  Off by default indoors (see the
-        // constructor), but kept so the option remains available.
-        if (_useMagnetometer
-            && _sampleCount >= MagWarmupSamples
-            && IsFinite(sample.Mag)
-            && sample.Mag.LengthSquared() > 1e-3f)
-        {
-            // Rotate the magnetometer reading into the world frame so
-            // the heading reference is in the horizontal plane only.
-            var mWorld = Vector3.Transform(sample.Mag, _q);
-            var mH = new Vector3(mWorld.X, 0, mWorld.Z);
-            if (mH.LengthSquared() > 1e-3f)
-            {
-                mH = Vector3.Normalize(mH);
-                var mHat = Vector3.Transform(mH, Quaternion.Inverse(_q));
-
-                // The magnetometer's horizontal direction, in the body
-                // frame, is the same kind of quantity: the world-frame
-                // north direction rotated into the device frame.
-                var estNorth = RotateByQuatInverse(Vector3.UnitX, _q);
-                // Project both into the horizontal plane.
-                var measuredNorth = Vector3.Cross(Vector3.UnitY, Vector3.Cross(mHat, Vector3.UnitY));
-                if (measuredNorth.LengthSquared() > 1e-6f)
-                {
-                    measuredNorth = Vector3.Normalize(measuredNorth);
-                    var magCorrection = Vector3.Cross(mHat, estNorth);
-                    totalErr += magCorrection * _tuning.KpMag;
-                    if (_tuning.KiMag > 0f)
-                    {
-                        _integralMag += magCorrection * _tuning.KiMag * dt;
-                        totalErr += _integralMag;
-                    }
-                }
-            }
-        }
+        // The magnetometer path was removed here.  It is documented in
+        // the file header: indoors the Rokid Max's magnetometer reads
+        // ~108 uT (Earth is 25-65 uT) and the chassis-dominated field
+        // swings with the device's orientation, so the heading
+        // correction fought the gyro in the direction the user was
+        // already turning.  Because the correction is projected into
+        // the horizontal plane only, it damaged yaw and left pitch and
+        // roll alone — the exact asymmetry the user reported.
+        //
+        // Removing it also removes the 52 degrees of false yaw that
+        // tools/ProbeYawJitter measured on a 90-degree head turn.
 
         // 9. Apply the correction to the gyro and integrate.
         var corrected = gyro + totalErr;

@@ -23,22 +23,8 @@ public sealed record AppSettings
     public int MaxPacketsPerSecond { get; init; } = 250;
 
     /// <summary>
-    /// Apply the magnetometer heading correction.
+    /// Low-pass smoothing factor in 0..1; 0 = no smoothing, 1 = frozen.
     /// </summary>
-    /// <remarks>
-    /// Off by default, and it should stay off.  The Rokid Max's
-    /// magnetometer reads about 108 uT indoors — far outside Earth's
-    /// 25-65 uT field — because the desk, the monitors and the
-    /// glasses' own electronics distort it.  Enabling the correction
-    /// makes the panel slew violently (20-90 degree jumps) as the user
-    /// moves.  Every production 3DoF runtime — Virtual Desktop,
-    /// SteamVR, Bigscreen — disables magnetometers for exactly this
-    /// reason.  The user can still turn it on for curiosity, but the
-    /// default is the correct one.
-    /// </remarks>
-    public bool UseMagnetometer { get; init; } = false;
-
-    /// <summary>Low-pass smoothing factor in 0..1; 0 = no smoothing, 1 = frozen.</summary>
     public double Smoothing { get; init; } = 0.0;
 
     /// <summary>Output FOV in degrees; consumers may scale by this.</summary>

@@ -20,15 +20,22 @@ public class AppSettingsTests
         Assert.Equal("127.0.0.1", s.UdpHost);
         Assert.InRange(s.UdpPort, 1, 65535);
 
-        // The magnetometer must be OFF by default.  The Rokid Max's
-        // mag reads around 108 uT indoors, well outside Earth's
-        // 25-65 uT field, because the metal chassis dominates the
-        // reading.  Indoors the heading correction is then worse than
-        // no correction at all, and it fights the gyro in a way the
-        // user sees as the screen swinging around.  Every production
-        // 3DoF runtime (Virtual Desktop, SteamVR, Bigscreen) resolves
-        // heading by hand, not by compass.
-        Assert.False(s.UseMagnetometer);
+        // The magnetometer is GONE, not merely off by default.
+        //
+        // Indoors the Rokid Max's mag reads ~108 uT (Earth is 25-65 uT)
+        // because the metal chassis dominates the reading, and because
+        // the chassis is what dominates, the field swings with the
+        // device's ORIENTATION.  The heading correction this produces
+        // is projected into the horizontal plane only, so it corrupts
+        // yaw and leaves pitch and roll alone — the exact "vertical is
+        // smooth, horizontal stutters" asymmetry the user reported.
+        // Measured: a true 90-degree turn reported as 142 degrees.
+        //
+        // The setting is removed from the record entirely, so it cannot
+        // be persisted, restored from an old settings.json, or passed
+        // to the fusion.
+        Assert.False(typeof(AppSettings).GetProperty("UseMagnetometer") is not null,
+            "the magnetometer setting must not exist at all");
 
         Assert.Equal(0.0, s.Smoothing);
         Assert.Equal(60.0, s.FovDegrees);
@@ -77,7 +84,6 @@ public class SettingsServiceTests : IDisposable
         {
             UdpHost = "10.0.0.5",
             UdpPort = 9000,
-            UseMagnetometer = false,
             Smoothing = 0.42,
             FovDegrees = 75.0,
             Autostart = true,

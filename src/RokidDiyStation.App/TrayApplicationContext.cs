@@ -40,7 +40,6 @@ public sealed class TrayApplicationContext
     /// </remarks>
     private static Core.Spatial.SpatialAnchorOptions BuildAnchorOptions(AppSettings s) => new()
     {
-        UseMagnetometer = s.UseMagnetometer,
         LazyFollowDeadzoneDegrees = (float)Math.Clamp(s.LazyFollowDeadzoneDegrees, 0.0, 45.0),
         LazyFollowRatePerSecond = (float)Math.Clamp(s.LazyFollowRatePerSecond, 0.0, 10.0),
         NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),

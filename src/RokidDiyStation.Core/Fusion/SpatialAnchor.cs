@@ -49,6 +49,16 @@ public sealed class SpatialAnchor
     private AnchorState _state = AnchorState.Booting;
     private int _samplesSinceReset;
 
+    /// <param name="useMagnetometer">
+    /// DEPRECATED and IGNORED.  The magnetometer heading correction was
+    /// removed from the fusion entirely — see the header of
+    /// <see cref="MahonyFusion"/>.  Indoors the Rokid Max's mag reads
+    /// ~108 uT and its orientation-dependent chassis contribution
+    /// corrupted yaw while leaving pitch and roll alone.
+    ///
+    /// The parameter is retained only so that existing call sites keep
+    /// compiling; passing true no longer enables anything.
+    /// </param>
     public SpatialAnchor(MahonyTuning? tuning = null, bool useMagnetometer = true)
     {
         // Pass the nullable straight through: MahonyFusion resolves null

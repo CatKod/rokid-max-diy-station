@@ -53,6 +53,7 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -60,9 +61,13 @@
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Source window" VerticalAlignment="Center"/>
                 <ComboBox Grid.Row="0" Grid.Column="1" x:Name="WindowPickerBox" Margin="8,0,8,0"
-                          DisplayMemberPath="Title" SelectionChanged="OnWindowSelected" ToolTip="The window to project onto the glasses"/>
+                          DisplayMemberPath="Title" SelectionChanged="OnWindowSelected"
+                          DropDownOpened="OnWindowPickerDropDownOpened"
+                          ToolTip="The window to project onto the glasses. The list is re-scanned every time you open it."/>
                 <Button Grid.Row="0" Grid.Column="2" Content="Pin it" Click="OnPinClick" Padding="12,4"
                         Background="#FF006064" Foreground="White" BorderThickness="0" Cursor="Hand"/>
+                <Button Grid.Row="0" Grid.Column="3" Content="↻" Click="OnRefreshWindowsClick" Padding="10,4"
+                        ToolTip="Re-scan the list of windows" Cursor="Hand"/>
 
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="Comfort cone" VerticalAlignment="Center" Margin="0,8,0,0"
                            ToolTip="Inside this cone the panel is perfectly rigid. Outside it, the panel glides back towards your gaze."/>
@@ -100,8 +105,20 @@
         <!-- tracking -->
         <GroupBox Grid.Row="3" Header="Tracking" Padding="8" Margin="0,0,0,8">
             <StackPanel>
-                <CheckBox x:Name="MagBox"      Content="Use magnetometer (indoors this makes the panel jump — leave off)"
-                          ToolTip="The Rokid Max's magnetometer reads ~108 uT indoors, far outside Earth's 25-65 uT field. Turning it on makes the panel slew violently." Margin="0,0,0,4"/>
+                <!--
+                    The magnetometer checkbox used to live here.  It was
+                    removed rather than merely hidden, because on this
+                    hardware the magnetometer correction is not a
+                    trade-off the user should be offered: indoors the
+                    Rokid Max reads ~108 uT (Earth is 25-65 uT) and the
+                    chassis-dominated field swings with the device's
+                    orientation.  Measured, a true 90-degree head turn
+                    was reported as 142 degrees — 52 degrees of pure
+                    error — and because the correction is projected into
+                    the horizontal plane only, it damaged yaw and left
+                    pitch and roll alone.  That is precisely the
+                    "vertical is smooth, horizontal stutters" symptom.
+                -->
                 <CheckBox x:Name="RawPosBox"   Content="Emit head position (Raw X/Y/Z in metres)" IsChecked="True" Margin="0,0,0,4"/>
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
                     <TextBlock Text="FOV: " VerticalAlignment="Center"/>

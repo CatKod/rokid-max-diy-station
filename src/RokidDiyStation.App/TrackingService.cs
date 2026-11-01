@@ -81,7 +81,7 @@ public sealed class TrackingService : IDisposable
         // that the renderer can share it from the first frame.  The
         // renderer and the tracker MUST use the same anchor: they are
         // two views of one world frame.
-        _anchor = new SpatialAnchor(useMagnetometer: settings.UseMagnetometer);
+        _anchor = new SpatialAnchor();
     }
 
     /// <summary>Where diagnostic lines are mirrored to disk so the user
@@ -225,7 +225,7 @@ public sealed class TrackingService : IDisposable
         // world frame across a device reconnect.  A reconnect means the
         // IMU stream restarted, so the pose has to be re-established
         // from scratch.
-        var anchor = _anchor ??= new SpatialAnchor(useMagnetometer: _settings.UseMagnetometer);
+        var anchor = _anchor ??= new SpatialAnchor();
         Volatile.Write(ref _anchor, anchor);
         anchor.Reset();
         var emitter = new FreePieEmitter(new FreePieEmitterOptions(
