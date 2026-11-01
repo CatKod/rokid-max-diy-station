@@ -1026,7 +1026,6 @@ public sealed class PanelRenderer : IDisposable
 
                 _context.IASetInputLayout(_inputLayout);
                 _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
-                _context.IASetVertexBuffer(0, _vertexBuffer, 20, 0);
                 _context.OMSetRenderTargets(_backBuffer, _depthView);
                 _context.RSSetState(_rasterizer);
 
@@ -1058,10 +1057,13 @@ public sealed class PanelRenderer : IDisposable
                 //
                 // The panel's own render state is re-applied inside the
                 // loop, because the cursor's draw changes the pixel
-                // shader, the shader resource, the blend state and the
-                // depth state.  Without re-applying them, the SECOND
-                // eye's panel would be drawn with the cursor's texture
-                // and the cursor's shader.
+                // shader, the shader resource, the blend state, the
+                // depth state AND the vertex buffer.  Without
+                // re-applying them, the SECOND eye's panel would be
+                // drawn with the cursor's texture, the cursor's shader
+                // and the cursor's six vertices - which is exactly
+                // what happened: the right eye came out black,
+                // carrying only a stray cursor triangle.
                 var eyeWidth = _eyeViewportWidth;
                 for (uint eye = 0; eye * eyeWidth < _backBufferWidth; eye++)
                 {
@@ -1074,6 +1076,8 @@ public sealed class PanelRenderer : IDisposable
 
                     _context.OMSetBlendState(null);
                     _context.OMSetDepthStencilState(null, 0);
+                    _context.IASetVertexBuffer(0, _vertexBuffer, 20, 0);
+                    _context.VSSetShader(_vertexShader);
                     _context.PSSetShader(_pixelShader);
                     _context.PSSetConstantBuffer(0, _constantBuffer);
                     _context.PSSetSampler(0, _sampler);
@@ -1418,11 +1422,20 @@ public sealed class PanelRenderer : IDisposable
                     for (var x = 0; x < width; x++)
                     {
                         var p = row + (long)x * 4;
-                        // The back buffer is B8G8R8A8.
+                        // The back buffer is B8G8R8A8, so in memory the
+                        // bytes are B, G, R, A.
+                        //
+                        // Format32bppArgb is ALSO stored as B, G, R, A
+                        // (it is a little-endian ARGB), so the bytes are
+                        // copied straight across.  Swizzling them here
+                        // - writing R into the blue slot - makes every
+                        // red pixel come out blue in the PNG, which
+                        // looks like a rendering bug but is only a bug
+                        // in this diagnostic readback.
                         var o = (y * width + x) * 4;
-                        bytes[o + 0] = p[2];  // R
+                        bytes[o + 0] = p[0];  // B
                         bytes[o + 1] = p[1];  // G
-                        bytes[o + 2] = p[0];  // B
+                        bytes[o + 2] = p[2];  // R
                         bytes[o + 3] = 255;   // A
                     }
                 }

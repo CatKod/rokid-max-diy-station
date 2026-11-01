@@ -124,6 +124,39 @@ public sealed class SpatialInputCoordinator : IDisposable
     /// <summary>The window we are driving, or zero.</summary>
     public IntPtr TargetWindow => _window;
 
+    /// <summary>
+    /// The viewport's rectangle inside the captured image.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so a probe can check the coordinate mapping against a
+    /// known ground truth: the page's own layout gives a target a
+    /// position in CSS pixels, and this says where that lands in the
+    /// captured image.
+    /// </remarks>
+    public ViewportRect Viewport => _router.Viewport;
+
+    /// <summary>
+    /// Map a texture coordinate to the page's CSS pixels.
+    /// </summary>
+    /// <param name="u">Horizontal texture coordinate, 0 at the viewer's left.</param>
+    /// <param name="v">Vertical texture coordinate, 0 at the viewer's top.</param>
+    /// <param name="x">The CSS x coordinate.</param>
+    /// <param name="y">The CSS y coordinate.</param>
+    /// <returns>True when the mapping is available.</returns>
+    public bool ToCss(float u, float v, out double x, out double y)
+        => _router.Viewport.ToCss(u, v, _router.Geometry?.DevicePixelRatio ?? 1.0, out x, out y);
+
+    /// <summary>
+    /// Map a CSS pixel back into a texture coordinate.
+    /// </summary>
+    /// <param name="cssX">The CSS x coordinate.</param>
+    /// <param name="cssY">The CSS y coordinate.</param>
+    /// <param name="u">Horizontal texture coordinate, 0 at the viewer's left.</param>
+    /// <param name="v">Vertical texture coordinate, 0 at the viewer's top.</param>
+    /// <returns>True when the mapping is available.</returns>
+    public bool ToContent(double cssX, double cssY, out float u, out float v)
+        => _router.Viewport.ToContent(cssX, cssY, _router.Geometry?.DevicePixelRatio ?? 1.0, out u, out v);
+
     // -----------------------------------------------------------------
     // Attaching
     // -----------------------------------------------------------------

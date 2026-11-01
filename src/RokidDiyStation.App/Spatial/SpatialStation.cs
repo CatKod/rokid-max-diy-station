@@ -157,6 +157,15 @@ public sealed class SpatialStation : IDisposable
     /// <summary>The captured window's size in pixels.</summary>
     public (int Width, int Height) CaptureSize => _capture.Size;
 
+    /// <summary>
+    /// The bridge from the virtual cursor to the projected app.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so a probe can check the coordinate mapping end to end
+    /// against the page's own ground truth.
+    /// </remarks>
+    public SpatialInputCoordinator Input => _input!;
+
     // -----------------------------------------------------------------
     // Lifecycle
     // -----------------------------------------------------------------
@@ -400,6 +409,21 @@ public sealed class SpatialStation : IDisposable
                 {
                     var (w, h) = _capture.Size;
                     if (w > 0 && h > 0) _pointerInput.ContentSize = (w, h);
+                }
+
+                // The panel's SHAPE follows the content's shape, or the
+                // content is stretched.  The capture's size is only
+                // known once it has produced a frame, so the panel is
+                // re-pinned at that point - before that it was pinned
+                // with the default 16:9 shape.
+                //
+                // Only the first frame of a capture can change the
+                // aspect, so the re-pin happens once, not every frame.
+                var (cw, ch) = _capture.Size;
+                if (cw > 0 && ch > 0 && _anchor.SetContentSize(cw, ch))
+                {
+                    _anchor.AnchorHere();
+                    Log($"Panel shape follows the content's aspect: {cw}x{ch}.");
                 }
             }
 

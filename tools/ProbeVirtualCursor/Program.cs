@@ -56,6 +56,7 @@ using RokidDiyStation.App.Spatial;
 using RokidDiyStation.Core.Fusion;
 using RokidDiyStation.Core.HidCapture;
 using RokidDiyStation.Core.Protocol;
+using RokidDiyStation.Core.Spatial;
 
 internal static class Program
 {
@@ -394,6 +395,146 @@ internal static class Program
 
             GetCursorPos(out var after);
             Console.WriteLine($"    cursor after        : ({after.x}, {after.y})");
+
+            // -------------------------------------------------------------
+            // 5b. THE ACCURACY TEST - the cursor and the click must
+            //     agree on ONE content pixel
+            // -------------------------------------------------------------
+            //
+            // This is the test that decides whether the product works.
+            // Everything else checks that a signal ARRIVED; this checks
+            // that it arrived at the right PLACE.
+            //
+            // The ground truth comes from the page itself: the probe's
+            // red box is at CSS (100, 50) with a known size, so the
+            // page knows exactly where it is.  We therefore:
+            //
+            //   1. aim the virtual cursor at the box's CENTRE, using the
+            //      inverse of the CSS mapping,
+            //   2. click,
+            //   3. read back the CSS coordinates the renderer saw,
+            //   4. require them to land inside the box.
+            //
+            // If the cursor is drawn at the same (u, v) that the click
+            // is delivered at - and the CSS mapping is the same in both
+            // directions - the two must agree.  If they disagree, the
+            // arrow points at one thing and the click hits another,
+            // which is the single most confusing failure mode there is.
+            Console.WriteLine();
+            Console.WriteLine("[5b] The cursor and the click agree on the same pixel");
+
+            // The red box's centre, in CSS pixels.  It is at (100, 50)
+            // and is 200x100, so the centre is (200, 100).
+            const double targetCssX = 200;
+            const double targetCssY = 100;
+
+            var vc2 = station.Renderer.Cursor;
+            if (vc2 is null)
+            {
+                failures.Add("the renderer has no virtual cursor");
+            }
+            else if (!station.Input.ToContent(targetCssX, targetCssY, out var targetU, out var targetV))
+            {
+                failures.Add("the CSS -> content mapping is not available");
+            }
+            else
+            {
+                Console.WriteLine($"    target CSS          : ({targetCssX:F0}, {targetCssY:F0})");
+                Console.WriteLine($"    target content uv   : ({targetU:F4}, {targetV:F4})");
+
+                // Where does the browser think that content point is?
+                if (!station.Input.ToCss(targetU, targetV, out var expectCssX, out var expectCssY))
+                {
+                    failures.Add("the content -> CSS mapping is not available");
+                }
+                else
+                {
+                    Console.WriteLine($"    maps back to CSS    : ({expectCssX:F0}, {expectCssY:F0})");
+                    if (Math.Abs(expectCssX - targetCssX) > 1 || Math.Abs(expectCssY - targetCssY) > 1)
+                    {
+                        failures.Add(
+                            $"the CSS mapping is not a round trip: ({targetCssX:F0}, {targetCssY:F0}) "
+                            + $"-> ({targetU:F4}, {targetV:F4}) -> ({expectCssX:F0}, {expectCssY:F0})");
+                    }
+                }
+
+                // Now drive the real mouse to that content position.
+                //
+                // The cursor's position is reached by DIFFERENTIAL
+                // movement, and the gain is the app's own:
+                //
+                //   scaleX = contentWidth / eyeViewportWidth
+                //
+                // so a mouse delta of D display pixels moves the cursor
+                // by D * scaleX content pixels, which is
+                // D * scaleX / contentWidth of the panel's width.
+                //
+                // Solving for the mouse delta that produces a desired
+                // change of du:
+                //
+                //   D = du * contentWidth / scaleX
+                //     = du * eyeViewportWidth
+                //
+                // which is remarkably simple: to move the cursor by a
+                // fraction du of the panel's width, the mouse moves by
+                // that same fraction of ONE EYE's width in display
+                // pixels.  The content's size cancels out.
+                var (curU, curV) = vc2.Position;
+                var eyeWidth = RokidDisplayProfile.EyeViewportWidth(target.Bounds.Width);
+                var needDx = (targetU - curU) * eyeWidth;
+                var needDy = (targetV - curV) * target.Bounds.Height;
+
+                GetCursorPos(out var p0);
+                var px0 = p0.x;
+                var py0 = p0.y;
+                MoveMouseTo(px0 + (int)Math.Round(needDx), py0 + (int)Math.Round(needDy));
+                await Task.Delay(600);
+
+                var (gotU, gotV) = vc2.Position;
+                Console.WriteLine($"    cursor reached      : ({gotU:F4}, {gotV:F4})  "
+                                  + $"(wanted {targetU:F4}, {targetV:F4})");
+
+                var uvError = Math.Max(Math.Abs(gotU - targetU), Math.Abs(gotV - targetV));
+                Console.WriteLine($"    uv error            : {uvError:F4}");
+                if (uvError > 0.02)
+                {
+                    failures.Add(
+                        $"the cursor did not reach the aimed point: uv error {uvError:F4} "
+                        + $"(wanted {targetU:F4}, {targetV:F4}, got {gotU:F4}, {gotV:F4})");
+                }
+
+                // Click and see where the renderer says it landed.
+                await reader.EvaluateAsync("window.__events=[]");
+                Click();
+                await Task.Delay(1000);
+
+                recorded = await reader.EvaluateAsync("JSON.stringify(window.__events)");
+                events = JsonNode.Parse(recorded ?? "[]")!.AsArray();
+                var click2 = events.FirstOrDefault(e => e!["type"]!.GetValue<string>() == "click");
+                if (click2 is null)
+                {
+                    failures.Add("the aimed click never reached the renderer");
+                }
+                else
+                {
+                    var c2x = click2["x"]!.GetValue<double>();
+                    var c2y = click2["y"]!.GetValue<double>();
+                    Console.WriteLine($"    renderer saw click  : ({c2x:F0}, {c2y:F0})");
+
+                    // It must be inside the 200x100 red box.
+                    const double boxLeft = 100, boxTop = 50, boxRight = 300, boxBottom = 150;
+                    if (c2x < boxLeft || c2x > boxRight || c2y < boxTop || c2y > boxBottom)
+                    {
+                        failures.Add(
+                            $"the aimed click landed at ({c2x:F0}, {c2y:F0}), outside the "
+                            + $"target box ({boxLeft:F0},{boxTop:F0})-({boxRight:F0},{boxBottom:F0})");
+                    }
+                    else
+                    {
+                        Console.WriteLine("    -> the click landed inside the target box: PASS");
+                    }
+                }
+            }
 
             // -------------------------------------------------------------
             // 6. Wheel
@@ -761,13 +902,44 @@ internal static class Program
             return;
         }
 
-        // The marker appears in BOTH eyes now, so find the one in the
-        // left eye and measure it there.
+        // The marker appears in BOTH eyes, so the bounding box over the
+        // whole buffer spans both of them.  Measure the LEFT eye's
+        // copy on its own, because that is the one the viewport maps.
         var eyeWidth = half;
-        var boxWidth = maxX - minX + 1;
-        Console.WriteLine($"    red marker          : x {minX}..{maxX}, y {minY}..{maxY}  ({boxWidth}px wide)");
-        Console.WriteLine($"    horizontal scale    : {boxWidth / 200.0:F3}x  (1.000 = the page is 1:1 with the panel)");
+        int minXL = int.MaxValue, maxXL = -1, minYL = int.MaxValue, maxYL = -1;
+        for (var y = 0; y < bmp.Height; y++)
+        for (var x = 0; x < eyeWidth; x++)
+        {
+            var c = bmp.GetPixel(x, y);
+            if (c.R > 150 && c.G < 80 && c.B < 80)
+            {
+                if (x < minXL) minXL = x;
+                if (x > maxXL) maxXL = x;
+                if (y < minYL) minYL = y;
+                if (y > maxYL) maxYL = y;
+            }
+        }
+
+        var boxWidth = maxXL - minXL + 1;
+        var boxHeight = maxYL - minYL + 1;
+        Console.WriteLine($"    red marker          : x {minXL}..{maxXL}, y {minYL}..{maxYL}  ({boxWidth}x{boxHeight}px)");
         Console.WriteLine($"    eye viewport        : {eyeWidth}px wide");
+
+        // The page's own box is 200x100 CSS pixels.  The panel shows
+        // the captured window's bitmap across a viewport whose size
+        // is set by the panel's ANGULAR size, so the on-screen scale
+        // is not 1:1 - what matters is that the two eyes agree and
+        // that the SHAPE is preserved (no 2x stretch).
+        var aspect = boxWidth / (double)Math.Max(1, boxHeight);
+        Console.WriteLine($"    marker aspect      : {aspect:F3}  (the CSS box is 200x100 = 2.000)");
+        if (Math.Abs(aspect - 2.0) > 0.15)
+        {
+            Console.WriteLine("    -> the marker is STRETCHED; the content aspect is wrong.");
+        }
+        else
+        {
+            Console.WriteLine("    -> the marker keeps its 2:1 shape: the content is not stretched.");
+        }
     }
 
     /// <summary>

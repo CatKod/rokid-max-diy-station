@@ -82,6 +82,42 @@ public readonly record struct ViewportRect(int Left, int Top, int Width, int Hei
         y = py / devicePixelRatio;
         return true;
     }
+
+    /// <summary>
+    /// Map a CSS pixel back into a texture coordinate.
+    /// </summary>
+    /// <param name="cssX">The CSS x coordinate.</param>
+    /// <param name="cssY">The CSS y coordinate.</param>
+    /// <param name="devicePixelRatio">The page's device pixel ratio.</param>
+    /// <param name="u">Horizontal texture coordinate, 0 at the viewer's left.</param>
+    /// <param name="v">Vertical texture coordinate, 0 at the viewer's top.</param>
+    /// <returns>True when the mapping is available.</returns>
+    /// <remarks>
+    /// This is the INVERSE of <see cref="ToCss"/>, and it is what a
+    /// probe needs to answer the question "if I want the cursor to be
+    /// over this particular thing on the page, where does the mouse
+    /// have to point?".
+    ///
+    /// The round trip ToCss(ToContent(x)) == x is what makes the
+    /// virtual cursor trustworthy: the click is delivered at the CSS
+    /// coordinate, and the arrow is drawn at the texture coordinate,
+    /// so the two must be inverses of each other or the cursor lies.
+    /// </remarks>
+    public bool ToContent(double cssX, double cssY, double devicePixelRatio, out float u, out float v)
+    {
+        if (Width <= 0 || Height <= 0)
+        {
+            u = 0;
+            v = 0;
+            return false;
+        }
+
+        var px = cssX * devicePixelRatio - Left;
+        var py = cssY * devicePixelRatio - Top;
+        u = (float)(px / Width);
+        v = (float)(py / Height);
+        return true;
+    }
 }
 
 /// <summary>

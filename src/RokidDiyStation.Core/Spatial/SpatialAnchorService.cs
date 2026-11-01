@@ -343,6 +343,37 @@ public sealed class SpatialAnchorService
     public void Update(in ImuSample sample) => _anchor.Update(sample);
 
     /// <summary>
+    /// The aspect ratio (width / height) of the content the panel shows.
+    /// </summary>
+    /// <remarks>
+    /// The panel's SHAPE follows the content's shape, so that nothing
+    /// is stretched.  The captured window's size is not known until a
+    /// capture starts, so this defaults to 16:9 and is updated when
+    /// the capture reports its real size.
+    ///
+    /// Setting it re-pins the panel, because the panel's height - and
+    /// therefore its angular size - changes with it.
+    /// </remarks>
+    public float ContentAspect { get; private set; } = RokidDisplayProfile.Aspect;
+
+    /// <summary>
+    /// Tell the service the shape of the content being shown.
+    /// </summary>
+    /// <param name="width">The captured content's width, in pixels.</param>
+    /// <param name="height">The captured content's height, in pixels.</param>
+    /// <returns>True when the aspect changed and the panel was re-pinned.</returns>
+    public bool SetContentSize(int width, int height)
+    {
+        if (width <= 0 || height <= 0) return false;
+
+        var aspect = (float)width / height;
+        if (MathF.Abs(aspect - ContentAspect) < 1e-4f) return false;
+
+        ContentAspect = aspect;
+        return true;
+    }
+
+    /// <summary>
     /// Apply new options at runtime.
     /// </summary>
     /// <remarks>
@@ -412,7 +443,7 @@ public sealed class SpatialAnchorService
 
         var width = RokidDisplayProfile.PanelWidth(
             _options.PanelDistance, _options.PanelFovFraction, _options.DiagonalFovDegrees);
-        var height = RokidDisplayProfile.PanelHeight(width);
+        var height = RokidDisplayProfile.PanelHeight(width, ContentAspect);
 
         // The gaze direction, with the ergonomic downward bias applied.
         var gaze = NeckModelCamera.Forward(headQ);

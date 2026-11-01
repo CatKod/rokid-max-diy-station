@@ -152,6 +152,33 @@ public static class RokidDisplayProfile
     public static float PanelHeight(float width) => width / Aspect;
 
     /// <summary>
+    /// The height, in metres, of a panel with the given width and the
+    /// given CONTENT aspect ratio.
+    /// </summary>
+    /// <param name="width">The panel's width, in metres.</param>
+    /// <param name="contentAspect">The captured content's width / height.</param>
+    /// <remarks>
+    /// The panel's shape must match the CONTENT's shape, or the content
+    /// is stretched.
+    ///
+    /// The PROJECTION is a 16:9 frustum because that is ONE EYE's
+    /// viewport, but the PANEL - the quad in the world - does not have
+    /// to be 16:9.  The captured window can be any shape: a browser
+    /// in --app mode is whatever size the user made it, and a window
+    /// captured whole includes its frame.
+    ///
+    /// Measured on the hardware (2026-11-01): the probe's 1200x800
+    /// browser window (3:2) rendered on a 16:9 panel came out with a
+    /// marker aspect of 2.385 instead of 2.0 - stretched by exactly
+    /// (16/9) / (3/2) = 1.185.
+    ///
+    /// So the panel's height is derived from the content's own aspect:
+    /// height = width / contentAspect.
+    /// </remarks>
+    public static float PanelHeight(float width, float contentAspect)
+        => contentAspect > 1e-4f ? width / contentAspect : PanelHeight(width);
+
+    /// <summary>
     /// The subtended horizontal angle, in degrees, of a panel of the given
     /// width at the given distance.
     /// </summary>
