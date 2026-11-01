@@ -484,6 +484,94 @@ public sealed class CdpClient : IDisposable
         return mask;
     }
 
+    // -----------------------------------------------------------------
+    // Input.dispatchKeyEvent
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Press or release a key.
+    /// </summary>
+    /// <param name="type">
+    /// "keyDown", "keyUp", "rawKeyDown" or "char".
+    /// </param>
+    /// <param name="key">The DOM <c>KeyboardEvent.key</c> value.</param>
+    /// <param name="code">The DOM <c>KeyboardEvent.code</c> value.</param>
+    /// <param name="windowsVirtualKeyCode">The Win32 virtual key code.</param>
+    /// <param name="text">The text the key produced, for printable keys.</param>
+    /// <param name="modifiers">The modifier bitmask in effect.</param>
+    /// <param name="autoRepeat">True when this is a key repeat.</param>
+    /// <param name="isKeypad">True for the numeric keypad.</param>
+    /// <param name="location">0 = standard, 1 = left, 2 = right, 3 = numpad.</param>
+    public Task<bool> KeyEventAsync(
+        string type,
+        string key,
+        string code,
+        int windowsVirtualKeyCode,
+        string? text = null,
+        int modifiers = 0,
+        bool autoRepeat = false,
+        bool isKeypad = false,
+        int location = 0,
+        string? unmodifiedText = null,
+        CancellationToken token = default)
+    {
+        var parameters = new JsonObject
+        {
+            ["type"] = type,
+            ["key"] = key,
+            ["code"] = code,
+            ["windowsVirtualKeyCode"] = windowsVirtualKeyCode,
+            ["nativeVirtualKeyCode"] = windowsVirtualKeyCode,
+            ["modifiers"] = modifiers,
+            ["autoRepeat"] = autoRepeat,
+            ["isKeypad"] = isKeypad,
+            ["location"] = location,
+        };
+
+        // The text fields carry the character.  Chromium uses them
+        // when the key is one that produces text, and they must be
+        // ABSENT - not empty - for a key that does not, because an
+        // empty string still counts as "this event has text" and
+        // Chromium would then commit an empty edit.
+        if (!string.IsNullOrEmpty(text))
+        {
+            parameters["text"] = text;
+
+            // The unmodified text is the character without the
+            // modifiers - the "a" of a key that produced "A".  It is
+            // what an application reads to know what the key MEANS
+            // rather than what it typed.  When the two are the same,
+            // the single value is enough.
+            parameters["unmodifiedText"] = string.IsNullOrEmpty(unmodifiedText)
+                ? text
+                : unmodifiedText;
+        }
+
+        return SendAsync("Input.dispatchKeyEvent", parameters, token);
+    }
+
+    /// <summary>
+    /// Send a character as a "char" event.
+    /// </summary>
+    /// <remarks>
+    /// This is the text-only event.  It exists because some
+    /// applications - text inputs in particular - want the character
+    /// without a key event, and because a key event that carries text
+    /// and a separate char event would insert the character twice.
+    /// </remarks>
+    public Task<bool> CharEventAsync(
+        string text,
+        int modifiers = 0,
+        CancellationToken token = default)
+        => SendAsync("Input.dispatchKeyEvent", new JsonObject
+        {
+            ["type"] = "char",
+            ["key"] = text,
+            ["text"] = text,
+            ["unmodifiedText"] = text,
+            ["modifiers"] = modifiers,
+        }, token);
+
     /// <summary>
     /// Close the socket, keeping the client reusable.
     /// </summary>

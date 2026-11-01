@@ -121,6 +121,20 @@ public sealed class SpatialInputCoordinator : IDisposable
     /// </remarks>
     public int Port { get; set; } = CdpDiscovery.DefaultPort;
 
+    /// <summary>
+    /// Every DevTools port worth searching.
+    /// </summary>
+    /// <remarks>
+    /// The browser we launch ourselves listens on the default port,
+    /// and the Electron applications we launch listen on their own
+    /// dedicated port - a launched application must not collide with
+    /// the browser the user already has open.
+    ///
+    /// So the attach searches BOTH: the projected window is whichever
+    /// one it is, and the search finds it either way.
+    /// </remarks>
+    public IReadOnlyList<int> Ports { get; set; } = new[] { CdpDiscovery.DefaultPort, AppLauncher.Port };
+
     /// <summary>The window we are driving, or zero.</summary>
     public IntPtr TargetWindow => _window;
 
@@ -220,20 +234,69 @@ public sealed class SpatialInputCoordinator : IDisposable
         var title = _window == IntPtr.Zero ? "" : NativeMethods.GetTitleOf(_window);
         if (title.Length == 0) title = _expectedTitle;
 
-        var pages = await CdpDiscovery.ListPagesAsync(Port, token).ConfigureAwait(false);
-        if (pages.Count == 0)
+        // The page may live on any of the ports we know about: the
+        // default one for the browser, the dedicated one for the
+        // applications we launch.
+        //
+        // The search is SCORED, not "first port wins": the user's own
+        // browser may be on the default port with a single tab open,
+        // and that tab must never be captured by mistake just because
+        // its port came first.
+        var candidates = new List<(CdpTarget Target, int Port, int Score)>();
+        var searched = new List<int>();
+
+        // The port that was set explicitly is always searched - it is
+        // the one the caller knows about.  The known ports are tried
+        // after it.
+        var ports = new List<int> { Port };
+        foreach (var port in Ports)
         {
-            Log("No debuggable page found on port " + Port
-                + ". Is the projected window a browser launched with --remote-debugging-port?");
+            if (!ports.Contains(port)) ports.Add(port);
+        }
+
+        foreach (var port in ports)
+        {
+            if (searched.Contains(port)) continue;
+            searched.Add(port);
+
+            var pages = await CdpDiscovery.ListPagesAsync(port, token).ConfigureAwait(false);
+            if (pages.Count == 0) continue;
+
+            foreach (var page in pages)
+            {
+                var score = ScoreTarget(page, title, _expectedUrl);
+
+                // A port with exactly ONE real page is that page's
+                // endpoint - the Electron application we launched has
+                // one workbench document.  It scores below an exact
+                // title match, so the user's own single tab in their
+                // browser can never outrank a real match.
+                if (score == 0 && IsSoleCandidate(pages, page))
+                    score = 50;
+
+                if (score > 0) candidates.Add((page, port, score));
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            Log("No debuggable page matched the projected window on any known port ("
+                + string.Join(", ", searched) + "). Is the projected window an app started "
+                + "with --remote-debugging-port?");
             return false;
         }
 
-        var target = MatchTarget(pages, title, _expectedUrl);
-        if (target is null)
-        {
-            Log("No CDP page matches the projected window's title \"" + title + "\".");
-            return false;
-        }
+        // The best match wins; a tie is broken by the exact title, and
+        // then by the dedicated launch port - an application we started
+        // is more likely to be the intended target than a tab in the
+        // user's own browser.
+        var best = candidates
+            .OrderByDescending(c => c.Score)
+            .ThenByDescending(c => c.Port == AppLauncher.Port)
+            .First();
+
+        var target = best.Target;
+        Port = best.Port;
 
         if (!await _router.ConnectAsync(target.WebSocketDebuggerUrl, token).ConfigureAwait(false))
         {
@@ -260,38 +323,84 @@ public sealed class SpatialInputCoordinator : IDisposable
     /// The URL is the fallback: the projected window was opened from
     /// a URL, and the CDP target reports the same one.
     /// </remarks>
-    private static CdpTarget? MatchTarget(
-        IReadOnlyList<CdpTarget> pages, string title, string url = "")
+    /// <summary>
+    /// How well a page matches the projected window.
+    /// </summary>
+    /// <remarks>
+    /// The score is a RANK, not a match/no-match flag, because the
+    /// coordinator searches several ports at once and has to pick
+    /// between candidates.  Zero means "not a candidate at all".
+    ///
+    /// The ranking matters most in the one dangerous case: the user's
+    /// own browser is open on the default port with one tab, and an
+    /// application we launched is on the dedicated port.  An exact
+    /// title match has to beat the "there is only one page here"
+    /// fallback, or the user's tab gets hijacked.
+    /// </remarks>
+    private static int ScoreTarget(CdpTarget page, string title, string url)
     {
+        // Internal pages are never a target.
+        if (page.Url.StartsWith("devtools://", StringComparison.OrdinalIgnoreCase)) return 0;
+        if (page.Url.StartsWith("chrome://", StringComparison.OrdinalIgnoreCase)) return 0;
+        if (page.Url.StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase)) return 0;
+        if (page.Type != "page") return 0;
+
         if (title.Length > 0)
         {
-            foreach (var page in pages)
-            {
-                if (string.Equals(page.Title, title, StringComparison.OrdinalIgnoreCase))
-                    return page;
-            }
+            if (string.Equals(page.Title, title, StringComparison.OrdinalIgnoreCase))
+                return 100;
+
+            // A substring match, because an application's window title
+            // and its page title are rarely identical: VS Code's
+            // window says "notes.md - Visual Studio Code" while the
+            // page it renders says "Visual Studio Code".
+            if (page.Title.Length > 0
+                && (page.Title.Contains(title, StringComparison.OrdinalIgnoreCase)
+                    || title.Contains(page.Title, StringComparison.OrdinalIgnoreCase)))
+                return 70;
         }
 
-        if (url.Length > 0)
-        {
-            foreach (var page in pages)
-            {
-                if (string.Equals(page.Url, url, StringComparison.OrdinalIgnoreCase))
-                    return page;
-            }
-        }
+        if (url.Length > 0
+            && string.Equals(page.Url, url, StringComparison.OrdinalIgnoreCase))
+            return 90;
 
-        // Fall back to the first page whose URL is not a browser
-        // internal page.  This is the right answer for the dedicated
-        // --app instance, which has exactly one page.
+        // The last resort: a port that has exactly ONE candidate page
+        // IS that page's endpoint.  This is the case for an Electron
+        // application we launched - it has one workbench document.
+        return 0;
+    }
+
+    /// <summary>
+    /// Whether a page is the only real candidate on its port.
+    /// </summary>
+    /// <remarks>
+    /// A port with exactly one candidate page IS that page's
+    /// endpoint.  This is the case for an Electron application we
+    /// launched - it has one workbench document.
+    ///
+    /// It is deliberately NOT "the first page on the port".  A browser
+    /// the user already has open can have a dozen tabs, and picking
+    /// the first of them would drive the WRONG window - which is
+    /// worse than driving nothing at all.
+    /// </remarks>
+    private static bool IsSoleCandidate(
+        IReadOnlyList<CdpTarget> pages, CdpTarget candidate)
+    {
+        CdpTarget? sole = null;
+        var count = 0;
+
         foreach (var page in pages)
         {
+            if (page.Type != "page") continue;
             if (page.Url.StartsWith("devtools://", StringComparison.OrdinalIgnoreCase)) continue;
             if (page.Url.StartsWith("chrome://", StringComparison.OrdinalIgnoreCase)) continue;
-            return page;
+            if (page.Url.StartsWith("chrome-extension://", StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.IsNullOrEmpty(page.WebSocketDebuggerUrl)) continue;
+            sole = page;
+            count++;
         }
 
-        return pages.Count > 0 ? pages[0] : null;
+        return count == 1 && ReferenceEquals(sole, candidate);
     }
 
     // -----------------------------------------------------------------
@@ -332,6 +441,30 @@ public sealed class SpatialInputCoordinator : IDisposable
             }
 
             await _router.ButtonAsync(e.Button, e.IsDown, u, v, modifiers, 1, ct).ConfigureAwait(false);
+        }));
+        _signal.Release();
+    }
+
+    /// <summary>
+    /// Deliver a keystroke to the projected application.
+    /// </summary>
+    /// <remarks>
+    /// Keystrokes are QUEUED, not coalesced.  The order of a key
+    /// sequence is the message: "a", "b", "c" has to arrive as
+    /// a-b-c, and a press has to arrive before its release.  The
+    /// worker thread is the only thing that talks to the browser, so
+    /// queueing here is what preserves the order.
+    /// </remarks>
+    /// <param name="key">The keystroke, already resolved.</param>
+    /// <param name="alt">Whether Alt is held.</param>
+    /// <param name="control">Whether Ctrl is held.</param>
+    /// <param name="shift">Whether Shift is held.</param>
+    public void DeliverKey(ResolvedKey key, bool alt, bool control, bool shift)
+    {
+        _actions.Enqueue(new PendingAction(async ct =>
+        {
+            var modifiers = CdpClient.ModifierMask(alt, control, false, shift);
+            await _router.KeyAsync(key, modifiers, ct).ConfigureAwait(false);
         }));
         _signal.Release();
     }

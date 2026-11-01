@@ -126,6 +126,7 @@ public sealed class TrayApplicationContext
         menu.Items.Add(new System.Windows.Controls.Separator());
         menu.Items.Add(BuildPinSubmenu());
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Open an interactive browser…", Command = new RelayCommand(_ => OpenInteractiveBrowser()) });
+        menu.Items.Add(BuildAppSubmenu());
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Pin panel here (Ctrl+Space)", Command = new RelayCommand(_ => _tracking.SetAnchorHere()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Forget the panel (Ctrl+R)",     Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Recenter view (Ctrl+C)",        Command = new RelayCommand(_ => _mainWindow.Recenter()) });
@@ -205,6 +206,108 @@ public sealed class TrayApplicationContext
         // so the panel is placed at the pose the user had when they
         // pressed the hotkey.
         _station.AnchorHere();
+    }
+
+    /// <summary>
+    /// The "Open an interactive app…" submenu.
+    /// </summary>
+    /// <remarks>
+    /// This is the submenu that reaches BEYOND the browser.  Every app
+    /// in it is an Electron app - which is Chromium underneath - so it
+    /// speaks the DevTools protocol and can be driven by exactly the
+    /// same virtual cursor.
+    ///
+    /// The apps are STARTED with the debugging port open, using a
+    /// dedicated profile directory.  An app that is already running
+    /// cannot be given the switch, so the user's existing instance is
+    /// left alone and a second, drivable one is started instead.
+    ///
+    /// We verified this against VS Code: started with the switch, its
+    /// workbench received trusted mouse and keyboard events over the
+    /// protocol, and the OS mouse never moved.
+    /// </remarks>
+    private System.Windows.Controls.MenuItem BuildAppSubmenu()
+    {
+        var menu = new System.Windows.Controls.MenuItem { Header = "Open an interactive app…" };
+
+        void Populate()
+        {
+            menu.Items.Clear();
+
+            var apps = Input.AppLauncher.KnownApps();
+            if (apps.Count == 0)
+            {
+                menu.Items.Add(new System.Windows.Controls.MenuItem
+                {
+                    Header = "(no supported apps found)",
+                    IsEnabled = false,
+                });
+                return;
+            }
+
+            foreach (var app in apps)
+            {
+                var entry = app;
+                menu.Items.Add(new System.Windows.Controls.MenuItem
+                {
+                    Header = entry.Name,
+                    Command = new RelayCommand(_ => OpenInteractiveApp(entry)),
+                });
+            }
+        }
+
+        menu.SubmenuOpened += (_, _) => Populate();
+        Populate();
+        return menu;
+    }
+
+    /// <summary>
+    /// Launch an application we can drive, and pin it.
+    /// </summary>
+    private void OpenInteractiveApp(Input.DriveableApp app)
+    {
+        var process = Input.AppLauncher.Launch(app);
+        if (process is null)
+        {
+            _mainWindow.AppendLog($"Could not launch {app.Name}.");
+            return;
+        }
+
+        _mainWindow.AppendLog($"{app.Name} launched (drivable over the DevTools protocol).");
+
+        // The window appears a moment after the process starts, so this
+        // runs on a worker thread and pins the window when it shows up.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // Wait for the DevTools endpoint first: without it the
+                // app cannot be driven at all, and the user should be
+                // told that rather than being left with a dead panel.
+                if (!await Input.AppLauncher.WaitForEndpointAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false))
+                {
+                    _mainWindow.AppendLog($"{app.Name} did not expose a DevTools endpoint - "
+                                        + "it cannot be driven.");
+                    return;
+                }
+
+                var hwnd = Input.BrowserWindowFinder.WaitForWindowOfProcess(
+                    process, TimeSpan.FromSeconds(20));
+                if (hwnd == IntPtr.Zero)
+                {
+                    _mainWindow.AppendLog($"{app.Name}'s window did not appear in time.");
+                    return;
+                }
+
+                _mainWindow.AppendLog($"Pinning {app.Name} (0x{hwnd.ToInt64():X}).");
+                _station.QueueCapture(hwnd);
+                _station.AnchorHere();
+            }
+            catch (Exception ex)
+            {
+                _mainWindow.AppendLog($"Could not pin {app.Name}: {ex.Message}");
+            }
+        });
     }
 
     /// <summary>

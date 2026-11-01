@@ -558,6 +558,106 @@ public sealed class BrowserInputRouter : IDisposable
     }
 
     /// <summary>
+    /// The kind of key event a keystroke is dispatched as.
+    /// </summary>
+    /// <remarks>
+    /// The rules, in one place, because they are easy to get subtly
+    /// wrong and hard to debug afterwards:
+    ///
+    ///  * A RELEASE is always a "keyUp".  It never carries text, and
+    ///    it is never a "rawKeyDown" - a naive "no text means raw"
+    ///    rule sends the release as another press, and the application
+    ///    never sees the key go up.
+    ///
+    ///  * A PRINTABLE key's PRESS is a "keyDown" that carries the
+    ///    character.  The character arrives once, in the key event,
+    ///    which is what a text field expects.
+    ///
+    ///  * Everything else - arrows, Escape, the function keys - is a
+    ///    "rawKeyDown" with no text at all.  The text field must be
+    ///    ABSENT rather than empty, because an empty text field still
+    ///    counts as "this event has text" and the application would
+    ///    commit an empty edit.
+    ///
+    /// A separate "char" event is never sent: the key event already
+    /// carries the character, and sending both would type it twice.
+    /// </remarks>
+    public static string KeyEventType(ResolvedKey key) => key switch
+    {
+        { IsDown: false } => "keyUp",
+        { Text: not null } => "keyDown",
+        _ => "rawKeyDown",
+    };
+
+    /// <summary>
+    /// The text a key event carries.
+    /// </summary>
+    /// <remarks>
+    /// A release never carries text, whatever the key produced.
+    /// </remarks>
+    public static string? KeyEventText(ResolvedKey key) => key.IsDown ? key.Text : null;
+
+    /// <summary>
+    /// Send a keystroke to the app.
+    /// </summary>
+    /// <remarks>
+    /// The shape of the event depends on what the key is:
+    ///
+    ///  * A PRINTABLE key gets a "keyDown" that carries the text.  The
+    ///    character arrives once, in the key event, which is what a
+    ///    text field expects.
+    ///
+    ///  * A NON-PRINTABLE key (an arrow, Escape, a function key) gets
+    ///    a "rawKeyDown" with no text at all.  The text field must be
+    ///    ABSENT rather than empty, because an empty text field still
+    ///    counts as "this event has text" and the app would commit an
+    ///    empty edit.
+    ///
+    ///  * A RELEASE is always a "keyUp", whatever the key is.  A
+    ///    release carries no text and never did - sending it as a
+    ///    "rawKeyDown" would tell the app that the key went down
+    ///    again, and a held key would never be released.
+    ///
+    ///  * A "char" event is not sent separately, because the key
+    ///    event already carries the character and sending both would
+    ///    type it twice.
+    ///
+    /// The modifier bitmask carries the state of the OTHER modifiers,
+    /// which is how a shortcut like Ctrl+S is expressed.
+    /// </remarks>
+    public async Task<bool> KeyAsync(
+        ResolvedKey key, int modifiers, CancellationToken token = default)
+    {
+        if (key.Key.Length == 0) return false;
+
+        var type = KeyEventType(key);
+        var text = KeyEventText(key);
+
+        var ok = await _client.KeyEventAsync(
+            type,
+            key.Key,
+            key.Code,
+            key.VirtualKey,
+            text,
+            modifiers,
+            key.IsAutoRepeat,
+            key.IsKeypad,
+            key.Location,
+            key.UnmodifiedText,
+            token).ConfigureAwait(false);
+
+        if (!ok && !key.IsDown)
+        {
+            // A release that the app refused is not fatal - it usually
+            // means the app never saw the press either, which happens
+            // when the app was not focused at the time.
+            return false;
+        }
+
+        return ok;
+    }
+
+    /// <summary>
     /// Scroll the page.
     /// </summary>
     /// <param name="delta">

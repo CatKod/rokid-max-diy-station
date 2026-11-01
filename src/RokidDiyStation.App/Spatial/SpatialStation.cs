@@ -51,6 +51,7 @@ public sealed class SpatialStation : IDisposable
     private DisplayGuard? _guard;
     private VirtualCursor? _cursor;
     private PointerInput? _pointerInput;
+    private KeyboardInput? _keyboardInput;
     private SpatialInputCoordinator? _input;
 
     private Thread? _pumpThread;
@@ -82,6 +83,16 @@ public sealed class SpatialStation : IDisposable
     /// display.
     /// </summary>
     public event Action<bool>? OnPointerInsideChanged;
+
+    /// <summary>
+    /// Raised for each keystroke, once the pointer is over the glasses.
+    /// </summary>
+    /// <remarks>
+    /// The keystroke is already resolved into the DevTools protocol's
+    /// vocabulary - the DOM key name, the DOM code name and the
+    /// character the user's layout produced.
+    /// </remarks>
+    public event Action<ResolvedKey>? OnKey;
 
     /// <summary>The anchor service the renderer reads its camera from.</summary>
     public SpatialAnchorService Anchor => _anchor;
@@ -119,9 +130,31 @@ public sealed class SpatialStation : IDisposable
             OnPointerEvent?.Invoke(e);
             ForwardPointerEvent(e);
         };
-        _pointerInput.OnPointerInsideChanged += inside => OnPointerInsideChanged?.Invoke(inside);
+        _pointerInput.OnPointerInsideChanged += inside =>
+        {
+            // The keyboard is captured exactly when the pointer is over
+            // the glasses.  That is the user's way of saying "I am
+            // working in the glasses now" - and it keeps their real
+            // typing working everywhere else.
+            if (_keyboardInput is not null) _keyboardInput.IsCapturing = inside;
+
+            OnPointerInsideChanged?.Invoke(inside);
+        };
         _pointerInput.OnLog += line => Log(line);
         _renderer.Cursor = _cursor;
+
+        // The keyboard.  It is captured only while the pointer is over
+        // the glasses' display, which is the user's signal that they
+        // are working in the glasses.  Outside that, the hook only
+        // observes and every keystroke still goes to whatever the
+        // user was typing into.
+        _keyboardInput = new KeyboardInput();
+        _keyboardInput.OnKey += key =>
+        {
+            OnKey?.Invoke(key);
+            ForwardKey(key);
+        };
+        _keyboardInput.OnLog += line => Log(line);
 
         // The input coordinator: the bridge from the virtual cursor to
         // the projected application.  It owns a worker thread, because
@@ -205,6 +238,9 @@ public sealed class SpatialStation : IDisposable
             // thread with its own message pump, because the hook's
             // callback is invoked on the installing thread.
             _pointerInput?.StartHook();
+
+            // The keyboard hook, on its own thread for the same reason.
+            _keyboardInput?.StartHook();
 
             // The display guard keeps the panel window on the glasses'
             // display.  Without it, unplugging the USB-C cable makes
@@ -513,6 +549,32 @@ public sealed class SpatialStation : IDisposable
         input.Deliver(e, u, v);
     }
 
+    /// <summary>
+    /// Forward a keystroke to the projected application.
+    /// </summary>
+    /// <remarks>
+    /// The modifier state is read from the OS at the moment the key
+    /// goes down, because the hook's virtual key code for a modifier
+    /// is the modifier itself - the state of the OTHER modifiers is
+    /// what has to go into the bitmask.
+    /// </remarks>
+    private void ForwardKey(ResolvedKey key)
+    {
+        var input = _input;
+        if (input is null) return;
+
+        // A key is only delivered when there is something to deliver
+        // it TO.  Without this, the queue would fill with keystrokes
+        // for a window that is not interactive.
+        if (!input.IsInteractive) return;
+
+        input.DeliverKey(
+            key,
+            PointerInput.IsAltDown(),
+            PointerInput.IsControlDown(),
+            PointerInput.IsShiftDown());
+    }
+
     // -----------------------------------------------------------------
     // IMU feed
     // -----------------------------------------------------------------
@@ -577,6 +639,7 @@ public sealed class SpatialStation : IDisposable
         Stop();
         _input?.Dispose();
         _pointerInput?.Dispose();
+        _keyboardInput?.Dispose();
         _capture.Dispose();
         _renderer.Dispose();
         _cts?.Dispose();
