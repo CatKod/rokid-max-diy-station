@@ -2,7 +2,7 @@
 //
 // The physical mouse, as seen from the panel.
 //
-// This class sits between the Win32 window procedure and the virtual
+// This class sits between the Win32 input plumbing and the virtual
 // cursor, and it does three things:
 //
 //  1. It hides the OS arrow while the pointer is over the glasses'
@@ -14,6 +14,28 @@
 //
 //  3. It reports the user's clicks, wheel and modifier keys, so the
 //     input layer can forward them to the captured application.
+//
+// Why a low-level mouse HOOK, and not the window messages
+// ---------------------------------------------------------
+// The panel window is a real, opaque window, so it does receive
+// WM_LBUTTONDOWN and friends.  But two things make the window
+// messages the wrong channel:
+//
+//  * WM_MOUSEWHEEL is delivered to the FOCUSED window, not to the
+//    window under the pointer.  The panel is WS_EX_NOACTIVATE and
+//    never takes focus, so it would NEVER see a wheel event - the
+//    scroll would silently go to whatever the user had focused.
+//
+//  * Whether the panel wins the Z-order hit test is a side effect of
+//    WS_EX_TRANSPARENT, which for a non-layered window is a PAINT
+//    order flag rather than a hit-test rule.  Depending on that for
+//    the button events would be fragile.
+//
+// A WH_MOUSE_LL hook sees every mouse event on the machine, so this
+// class FILTERS BY THE POINTER'S POSITION: only events over the
+// glasses' display are treated as input for the panel.  The hook
+// callback runs on the thread that installed it, so the input thread
+// has its own message pump.
 //
 // Why the arrow can be hidden per-display
 // ----------------------------------------
@@ -28,25 +50,23 @@
 // working and the mouse messages keep arriving.  The cursor is only
 // not DRAWN.
 //
-// Why the position comes from polling, not from WM_MOUSEMOVE
-// ----------------------------------------------------------
+// Why the position comes from polling, not from the hook
+// -------------------------------------------------------
 // The mouse's POSITION is polled with GetCursorPos, once per frame,
-// rather than taken from WM_MOUSEMOVE.  Two reasons:
+// rather than taken from the hook's WM_MOUSEMOVE.  Two reasons:
 //
 //  * Entry detection.  If the pointer happens to be sitting over the
-//    glasses' display when the app starts, no WM_MOUSEMOVE ever
+//    glasses' display when the app starts, no move event ever
 //    arrives - the mouse is not moving.  Polling notices the pointer
 //    is there immediately.
 //
-//  * Leave detection.  WM_MOUSELEAVE depends on TrackMouseEvent,
-//    which is a request the window manager may or may not honour for
-//    a WS_EX_NOACTIVATE window.  Polling compares the pointer's
-//    position against the display's rectangle every frame, so the
-//    transition is detected the moment it happens.
+//  * Leave detection.  Polling compares the pointer's position
+//    against the display's rectangle every frame, so the transition
+//    is detected the moment it happens.
 //
-// The CLICK and WHEEL events still come from the window messages,
-// because those are events rather than states, and a poll would miss
-// a click that happened between two frames.
+// The CLICK and WHEEL events still come from the hook, because those
+// are events rather than states, and a poll would miss a click that
+// happened between two frames.
 //
 // What this class deliberately does NOT do
 // -----------------------------------------
@@ -82,7 +102,7 @@ public readonly record struct PointerEvent(
 /// Tracks the physical mouse over the glasses' display and drives the
 /// virtual cursor.
 /// </summary>
-public sealed class PointerInput
+public sealed class PointerInput : IDisposable
 {
     private readonly VirtualCursor _cursor;
     private readonly Func<PanelPose?> _poseProvider;
@@ -92,7 +112,12 @@ public sealed class PointerInput
     private int _lastX;
     private int _lastY;
     private bool _haveLastPosition;
-    private bool _pointerInside;
+    private volatile bool _pointerInside;
+
+    private IntPtr _hook;
+    private Thread? _hookThread;
+    private readonly CancellationTokenSource _cts = new();
+    private NativeMethods.MouseHookProc? _hookProc;
 
     /// <summary>Raised for clicks, wheel ticks and key presses.</summary>
     public event Action<PointerEvent>? OnPointerEvent;
@@ -125,6 +150,149 @@ public sealed class PointerInput
         _poseProvider = poseProvider;
         _viewProvider = viewProvider;
         _projectionProvider = projectionProvider;
+    }
+
+    // -----------------------------------------------------------------
+    // The low-level hook
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Install the low-level mouse hook on a dedicated thread.
+    /// </summary>
+    /// <remarks>
+    /// The hook's callback is invoked on the thread that installed it,
+    /// and that thread must pump messages - so it gets its own thread
+    /// with its own message loop.
+    ///
+    /// The delegate is kept in a field, because the hook holds a raw
+    /// pointer to it and a collected delegate would leave that
+    /// pointer dangling.
+    /// </remarks>
+    public void StartHook()
+    {
+        if (_hookThread is { IsAlive: true }) return;
+
+        _hookProc = OnMouseHook;
+
+        _hookThread = new Thread(HookThreadLoop)
+        {
+            IsBackground = true,
+            Name = "MouseHook",
+            // Above normal: the hook's latency is the latency of the
+            // user's click, and it should not queue behind the render
+            // thread's work.
+            Priority = ThreadPriority.AboveNormal,
+        };
+        _hookThread.Start();
+    }
+
+    private void HookThreadLoop()
+    {
+        try
+        {
+            _hook = NativeMethods.SetMouseHook(_hookProc!);
+            if (_hook == IntPtr.Zero)
+            {
+                // The hook could not be installed - almost always
+                // because another process has a higher-integrity
+                // hook, or UAC is in the way.  The window messages
+                // still work for clicks, just not for the wheel.
+                OnLog?.Invoke(
+                    "Could not install the low-level mouse hook - wheel scrolling over "
+                    + "the glasses may not reach the projected app.");
+            }
+
+            // The hook's messages arrive here, so this thread has to
+            // pump them.
+            while (!_cts.IsCancellationRequested)
+            {
+                if (!NativeMethods.PeekMessage(out var msg, IntPtr.Zero, 0, 0, NativeMethods.PM_REMOVE))
+                {
+                    Thread.Sleep(4);
+                    continue;
+                }
+                NativeMethods.TranslateMessage(ref msg);
+                NativeMethods.DispatchMessage(ref msg);
+            }
+        }
+        finally
+        {
+            if (_hook != IntPtr.Zero)
+            {
+                NativeMethods.UnhookWindowsHookEx(_hook);
+                _hook = IntPtr.Zero;
+            }
+        }
+    }
+
+    /// <summary>Raised for problems worth showing to the user.</summary>
+    public event Action<string>? OnLog;
+
+    /// <summary>
+    /// The low-level mouse hook callback.
+    /// </summary>
+    /// <remarks>
+    /// Only events over the glasses' display are consumed.  Everything
+    /// else is passed straight down the chain, so the user's normal
+    /// mouse behaviour on the other displays is untouched.
+    ///
+    /// The consumed events are SWALLOWED (a non-zero return), because
+    /// the panel window would otherwise also see them and the click
+    /// would be delivered twice.
+    /// </remarks>
+    private IntPtr OnMouseHook(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0)
+        {
+            var message = (uint)wParam.ToInt64();
+            if (message is NativeMethods.WM_LBUTTONDOWN
+                or NativeMethods.WM_LBUTTONUP
+                or NativeMethods.WM_RBUTTONDOWN
+                or NativeMethods.WM_RBUTTONUP
+                or NativeMethods.WM_MBUTTONDOWN
+                or NativeMethods.WM_MBUTTONUP
+                or NativeMethods.WM_MOUSEWHEEL)
+            {
+                var point = NativeMethods.GetPointFromHook(lParam);
+                if (DisplayBounds.Contains(point.x, point.y))
+                {
+                    HandleHookEvent(message, lParam);
+                    // Swallow it: the panel window would otherwise
+                    // receive the same click and dispatch it twice.
+                    return new IntPtr(1);
+                }
+            }
+        }
+
+        return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
+    }
+
+    private void HandleHookEvent(uint message, IntPtr lParam)
+    {
+        switch (message)
+        {
+            case NativeMethods.WM_LBUTTONDOWN:
+                Raise(PointerButton.Left, true, 0);
+                break;
+            case NativeMethods.WM_LBUTTONUP:
+                Raise(PointerButton.Left, false, 0);
+                break;
+            case NativeMethods.WM_RBUTTONDOWN:
+                Raise(PointerButton.Right, true, 0);
+                break;
+            case NativeMethods.WM_RBUTTONUP:
+                Raise(PointerButton.Right, false, 0);
+                break;
+            case NativeMethods.WM_MBUTTONDOWN:
+                Raise(PointerButton.Middle, true, 0);
+                break;
+            case NativeMethods.WM_MBUTTONUP:
+                Raise(PointerButton.Middle, false, 0);
+                break;
+            case NativeMethods.WM_MOUSEWHEEL:
+                RaiseWheel(NativeMethods.GetWheelDeltaFromHook(lParam));
+                break;
+        }
     }
 
     // -----------------------------------------------------------------
@@ -261,42 +429,37 @@ public sealed class PointerInput
     /// Handle a mouse message from the panel window.
     /// </summary>
     /// <remarks>
-    /// The panel window covers the whole glasses' display, so its
-    /// client coordinates ARE the display-local pixels.  The mouse
-    /// messages arrive because the panel is a real, opaque window:
-    /// WS_EX_TRANSPARENT is only a painting-order flag, and the panel
-    /// is not WS_EX_LAYERED, so it has always been receiving them.
-    ///
-    /// This is called on the render thread, from the window procedure.
+    /// The panel window's mouse messages are a FALLBACK for the button
+    /// events.  The low-level hook is the primary path, because the
+    /// wheel can only be seen there.  When the hook is installed the
+    /// hook swallows the events, so this method is not called for the
+    /// same click twice.
     /// </remarks>
     public void HandleMouseMessage(uint message, IntPtr wParam, IntPtr lParam)
     {
+        // If the hook is working, it owns the button events.
+        if (_hook != IntPtr.Zero) return;
+
         switch (message)
         {
             case NativeMethods.WM_LBUTTONDOWN:
                 Raise(PointerButton.Left, true, 0);
                 break;
-
             case NativeMethods.WM_LBUTTONUP:
                 Raise(PointerButton.Left, false, 0);
                 break;
-
             case NativeMethods.WM_RBUTTONDOWN:
                 Raise(PointerButton.Right, true, 0);
                 break;
-
             case NativeMethods.WM_RBUTTONUP:
                 Raise(PointerButton.Right, false, 0);
                 break;
-
             case NativeMethods.WM_MBUTTONDOWN:
                 Raise(PointerButton.Middle, true, 0);
                 break;
-
             case NativeMethods.WM_MBUTTONUP:
                 Raise(PointerButton.Middle, false, 0);
                 break;
-
             case NativeMethods.WM_MOUSEWHEEL:
                 RaiseWheel(NativeMethods.GetWheelDelta(wParam));
                 break;
@@ -355,5 +518,13 @@ public sealed class PointerInput
         _cursor.Deactivate();
 
         OnPointerInsideChanged?.Invoke(inside);
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        try { _hookThread?.Join(TimeSpan.FromSeconds(1)); } catch { }
+        _hookProc = null;
+        _cts.Dispose();
     }
 }

@@ -55,14 +55,14 @@ public sealed class HotkeyBinding : IDisposable
     public bool Register()
     {
         if (_registered) return true;
-        _registered = NativeMethods.RegisterHotKey(_source.Handle, Id, Modifiers, Key);
+        _registered = HotkeyNativeMethods.RegisterHotKey(_source.Handle, Id, Modifiers, Key);
         return _registered;
     }
 
     public void Unregister()
     {
         if (!_registered) return;
-        NativeMethods.UnregisterHotKey(_source.Handle, Id);
+        HotkeyNativeMethods.UnregisterHotKey(_source.Handle, Id);
         _registered = false;
     }
 
@@ -93,7 +93,15 @@ public sealed class HotkeyBinding : IDisposable
     }
 }
 
-internal static class NativeMethods
+/// <summary>
+/// The Win32 calls the hotkey registration needs.
+///
+/// Named distinctly from <see cref="RokidDiyStation.App.Spatial.NativeMethods"/>
+/// so the two do not collide in the compiler's namespace lookup -
+/// the parent namespace always wins over a <c>using</c> directive,
+/// which silently made the spatial RECT struct unreachable.
+/// </summary>
+internal static class HotkeyNativeMethods
 {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);

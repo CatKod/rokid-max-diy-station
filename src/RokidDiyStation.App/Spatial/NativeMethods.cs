@@ -150,6 +150,80 @@ public static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hwnd, out RECT lpRect);
 
+    /// <summary>
+    /// The client area of a window, in CLIENT coordinates.
+    /// </summary>
+    /// <remarks>
+    /// The client area excludes the caption bar and the border.  For a
+    /// browser in --app mode it is the whole viewport minus the
+    /// scrollbar, which is what makes the capture-to-viewport mapping
+    /// exact rather than a guess.
+    /// </remarks>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetClientRect(IntPtr hwnd, out RECT lpRect);
+
+    /// <summary>
+    /// Convert a client-area point to virtual-desktop coordinates.
+    /// </summary>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ClientToScreen(IntPtr hwnd, ref POINT lpPoint);
+
+    /// <summary>
+    /// The class name of a window, for identifying browser windows.
+    /// </summary>
+    /// <remarks>
+    /// Chromium's host windows all use "Chrome_WidgetWin_1", and Edge
+    /// uses the same one - they are the same codebase.  The
+    /// distinguishing feature is the window's TITLE, which for --app
+    /// mode is the page's title.
+    /// </remarks>
+    public static string GetClassNameOf(IntPtr hwnd)
+    {
+        var buffer = new System.Text.StringBuilder(256);
+        var length = GetClassName(hwnd, buffer, buffer.Capacity);
+        return length > 0 ? buffer.ToString() : "";
+    }
+
+    /// <summary>
+    /// The title of a window.
+    /// </summary>
+    public static string GetTitleOf(IntPtr hwnd)
+    {
+        var length = GetWindowTextLength(hwnd);
+        if (length <= 0) return "";
+        var buffer = new System.Text.StringBuilder(length + 2);
+        GetWindowText(hwnd, buffer, buffer.Capacity);
+        return buffer.ToString();
+    }
+
+    /// <summary>
+    /// The window's VISUAL frame bounds, in virtual-desktop coordinates.
+    /// </summary>
+    /// <remarks>
+    /// GetWindowRect returns the window's rectangle INCLUDING the
+    /// invisible resize border that DWM gives modern windows - about
+    /// 8 pixels on each side.  The visible frame is
+    /// DWMWA_EXTENDED_FRAME_BOUNDS.
+    ///
+    /// Which one the capture corresponds to depends on the OS build,
+    /// so the caller picks whichever matches the captured size - see
+    /// the geometry code in the input coordinator.
+    /// </remarks>
+    public static bool TryGetExtendedFrameBounds(IntPtr hwnd, out RECT rect)
+    {
+        rect = default;
+        return DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out rect, Marshal.SizeOf<RECT>()) == 0;
+    }
+
+    /// <summary>DWMWA_EXTENDED_FRAME_BOUNDS.</summary>
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+
+    [DllImport("dwmapi.dll", ExactSpelling = true)]
+    private static extern int DwmGetWindowAttribute(
+        IntPtr hwnd, int attribute, out RECT value, int size);
+
     // -----------------------------------------------------------------
     // Window messages
     // -----------------------------------------------------------------
@@ -266,6 +340,129 @@ public static class NativeMethods
     public const int VK_SHIFT = 0x10;
     public const int VK_CONTROL = 0x11;
     public const int VK_MENU = 0x12;
+
+    /// <summary>The left mouse button's virtual key code.</summary>
+    public const int VK_LBUTTON = 0x01;
+
+    /// <summary>The right mouse button's virtual key code.</summary>
+    public const int VK_RBUTTON = 0x02;
+
+    /// <summary>The middle mouse button's virtual key code.</summary>
+    public const int VK_MBUTTON = 0x04;
+
+    // -----------------------------------------------------------------
+    // Low-level mouse hook
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// A mouse hook callback.
+    /// </summary>
+    /// <remarks>
+    /// The return value decides whether the event is passed on:
+    /// <see cref="CallNextHookEx"/> continues the chain, a non-zero
+    /// value swallows the event.
+    /// </remarks>
+    public delegate IntPtr MouseHookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    /// <summary>WH_MOUSE_LL - the low-level mouse hook.</summary>
+    public const int WH_MOUSE_LL = 14;
+
+    /// <summary>
+    /// The payload of a low-level mouse hook callback.
+    /// </summary>
+    /// <remarks>
+    /// The layout is fixed by Windows: <c>pt</c> at offset 0, then
+    /// <c>mouseData</c>, then the flags.  The wheel delta lives in the
+    /// HIGH word of mouseData, signed.
+    /// </remarks>
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSLLMOUSEHOOKSTRUCT
+    {
+        /// <summary>The pointer's position, in virtual-desktop coordinates.</summary>
+        public POINT pt;
+
+        /// <summary>The mouse's data: wheel delta, or button flags.</summary>
+        public uint mouseData;
+
+        /// <summary>Event flags.</summary>
+        public uint flags;
+
+        /// <summary>Time the event was recorded.</summary>
+        public uint time;
+
+        /// <summary>Extra information supplied by the injector.</summary>
+        public IntPtr dwExtraInfo;
+    }
+
+    /// <summary>
+    /// Install a low-level mouse hook.
+    /// </summary>
+    /// <remarks>
+    /// A low-level mouse hook is the only way to see the WHEEL and the
+    /// BUTTONS reliably while the pointer is over the glasses'
+    /// display, for two reasons that are specific to our situation:
+    ///
+    ///  * WM_MOUSEWHEEL is delivered to the FOCUSED window, not to the
+    ///    window under the pointer.  Our panel is WS_EX_NOACTIVATE and
+    ///    never takes focus, so it would never see a wheel event - the
+    ///    scroll would go to whatever else the user had focused.
+    ///
+    ///  * Whether the panel wins the Z-order hit test depends on
+    ///    WS_EX_TRANSPARENT, which is a paint-order flag for a
+    ///    non-layered window.  That is subtle enough that relying on
+    ///    it for the button events would be fragile.
+    ///
+    /// The hook sees every mouse event on the machine, so the caller
+    /// MUST filter by the pointer's position.  The callback runs on the
+    /// thread that installed the hook, so that thread must pump
+    /// messages.
+    /// </remarks>
+    public static IntPtr SetMouseHook(MouseHookProc callback)
+    {
+        // The hook id is the thread id of the CALLER, so the hook's
+        // messages are delivered to the installing thread's queue.
+        var threadId = GetCurrentThreadId();
+        return SetWindowsHookEx(WH_MOUSE_LL, callback, IntPtr.Zero, threadId);
+    }
+
+    /// <summary>Remove a hook.</summary>
+    public static bool UnhookWindowsHookEx(IntPtr hook) => hook != IntPtr.Zero && UnhookWindowsHookExNative(hook);
+
+    /// <summary>Pass the event on to the next hook in the chain.</summary>
+    public static IntPtr CallNextHookEx(IntPtr hook, int nCode, IntPtr wParam, IntPtr lParam)
+        => CallNextHookExNative(hook, nCode, wParam, lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, MouseHookProc lpfn, IntPtr hMod, uint threadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookExNative(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookExNative(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    /// <summary>
+    /// The signed wheel delta from a hook's mouseData field.
+    /// </summary>
+    /// <remarks>
+    /// The delta is in the HIGH word.  It is signed, and it is a
+    /// multiple of 120 (WHEEL_DELTA) per detent - but it can be a
+    /// FRACTION of a detent on a high-resolution wheel, which is why
+    /// the value is not simply divided by 120.
+    /// </remarks>
+    public static int GetWheelDeltaFromHook(IntPtr lParam)
+    {
+        var data = Marshal.PtrToStructure<MSLLMOUSEHOOKSTRUCT>(lParam).mouseData;
+        return (short)((data >> 16) & 0xFFFF);
+    }
+
+    /// <summary>The pointer's position from a hook's payload.</summary>
+    public static POINT GetPointFromHook(IntPtr lParam)
+        => Marshal.PtrToStructure<MSLLMOUSEHOOKSTRUCT>(lParam).pt;
 
     /// <summary>
     /// Whether a key is currently held down.

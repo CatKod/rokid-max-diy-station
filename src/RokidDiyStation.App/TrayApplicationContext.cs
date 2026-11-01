@@ -4,6 +4,7 @@
 // the context menu and the global hotkeys.  Constructed on the UI
 // thread so the WPF infrastructure is up before we touch it.
 using System.IO;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Input;
 using H.NotifyIcon;
@@ -124,6 +125,7 @@ public sealed class TrayApplicationContext
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Show settings", Command = new RelayCommand(_ => ShowMainWindow()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
         menu.Items.Add(BuildPinSubmenu());
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Open an interactive browser…", Command = new RelayCommand(_ => OpenInteractiveBrowser()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Pin panel here (Ctrl+Space)", Command = new RelayCommand(_ => _tracking.SetAnchorHere()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Forget the panel (Ctrl+R)",     Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Recenter view (Ctrl+C)",        Command = new RelayCommand(_ => _mainWindow.Recenter()) });
@@ -203,6 +205,65 @@ public sealed class TrayApplicationContext
         // so the panel is placed at the pose the user had when they
         // pressed the hotkey.
         _station.AnchorHere();
+    }
+
+    /// <summary>
+    /// Launch a dedicated browser we can drive, and pin it.
+    /// </summary>
+    /// <remarks>
+    /// This is the path that makes the panel genuinely INTERACTIVE.
+    /// A browser the user already has running cannot be driven over the
+    /// DevTools protocol - Chrome only exposes that endpoint when it
+    /// was started with <c>--remote-debugging-port</c>, and it cannot
+    /// be enabled on a running instance.
+    ///
+    /// So we launch our own: a separate profile, in --app mode (no
+    /// tab strip, no address bar, so the client area IS the viewport
+    /// and the coordinate mapping is exact), with the debugging port
+    /// open.  The user's own browsing is untouched.
+    /// </remarks>
+    private void OpenInteractiveBrowser()
+    {
+        const string url = "https://www.youtube.com";
+
+        var exe = Input.BrowserLauncher.FindExecutable();
+        if (exe is null)
+        {
+            _mainWindow.AppendLog("No Chromium browser found to launch interactively.");
+            return;
+        }
+
+        var process = Input.BrowserLauncher.Launch(url);
+        if (process is null)
+        {
+            _mainWindow.AppendLog("Could not launch the interactive browser.");
+            return;
+        }
+
+        _mainWindow.AppendLog($"Interactive browser launched ({Path.GetFileName(exe)}).");
+
+        // The window appears a moment after the process starts, so this
+        // runs on a worker thread and pins the window when it shows up.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var hwnd = Input.BrowserWindowFinder.WaitForWindow(url, TimeSpan.FromSeconds(15));
+                if (hwnd == IntPtr.Zero)
+                {
+                    _mainWindow.AppendLog("The interactive browser's window did not appear in time.");
+                    return;
+                }
+
+                _mainWindow.AppendLog($"Pinning the interactive browser (0x{hwnd.ToInt64():X}).");
+                _station.QueueCapture(hwnd);
+                _station.AnchorHere();
+            }
+            catch (Exception ex)
+            {
+                _mainWindow.AppendLog($"Could not pin the interactive browser: {ex.Message}");
+            }
+        });
     }
 
     private bool _started;
@@ -298,19 +359,19 @@ public sealed class TrayApplicationContext
         // Use Ctrl+modifier so we don't steal Space/R/C from normal typing.
         // If registration fails (another app owns the hotkey) we log a
         // warning but the in-window buttons still work.
-        _spaceHotkey = TryHotkey(1, NativeMethods.MOD_CTRL, 0x20 /* VK_SPACE */);
+        _spaceHotkey = TryHotkey(1, HotkeyNativeMethods.MOD_CTRL, 0x20 /* VK_SPACE */);
         if (_spaceHotkey is not null)
             _spaceHotkey.Pressed += () => _tracking.SetAnchorHere();
         else
             _mainWindow.AppendLog("Hotkey Ctrl+Space (pin panel here) unavailable — another app may own it.");
 
-        _rHotkey = TryHotkey(2, NativeMethods.MOD_CTRL, 0x52 /* VK_R */);
+        _rHotkey = TryHotkey(2, HotkeyNativeMethods.MOD_CTRL, 0x52 /* VK_R */);
         if (_rHotkey is not null)
             _rHotkey.Pressed += () => _tracking.ResetAnchor();
         else
             _mainWindow.AppendLog("Hotkey Ctrl+R (forget the panel) unavailable.");
 
-        _cHotkey = TryHotkey(3, NativeMethods.MOD_CTRL, 0x43 /* VK_C */);
+        _cHotkey = TryHotkey(3, HotkeyNativeMethods.MOD_CTRL, 0x43 /* VK_C */);
         if (_cHotkey is not null)
             _cHotkey.Pressed += () => _mainWindow.Recenter();
         else
@@ -321,10 +382,10 @@ public sealed class TrayApplicationContext
         // list of alternates rather than silently losing the feature.
         _showHotkey = TryHotkeyWithFallback(4, "show/hide window", new[]
         {
-            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x52u, "Ctrl+Alt+R"),
-            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x48u, "Ctrl+Alt+H"),
-            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x53u, "Ctrl+Alt+S"),
-            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x4Fu, "Ctrl+Alt+O"),
+            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x52u, "Ctrl+Alt+R"),
+            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x48u, "Ctrl+Alt+H"),
+            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x53u, "Ctrl+Alt+S"),
+            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x4Fu, "Ctrl+Alt+O"),
         });
         if (_showHotkey is not null)
             _showHotkey.Pressed += () => ToggleMainWindow();
@@ -336,9 +397,9 @@ public sealed class TrayApplicationContext
         // easiest-to-reach combo.
         _pinHotkey = TryHotkeyWithFallback(5, "pin foreground window", new[]
         {
-            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x50u, "Ctrl+Alt+P"),
-            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT | NativeMethods.MOD_SHIFT, 0x50u, "Ctrl+Alt+Shift+P"),
-            (NativeMethods.MOD_CTRL | NativeMethods.MOD_ALT, 0x47u, "Ctrl+Alt+G"),
+            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x50u, "Ctrl+Alt+P"),
+            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT | HotkeyNativeMethods.MOD_SHIFT, 0x50u, "Ctrl+Alt+Shift+P"),
+            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x47u, "Ctrl+Alt+G"),
         });
         if (_pinHotkey is not null)
             _pinHotkey.Pressed += () => PinForegroundWindow();

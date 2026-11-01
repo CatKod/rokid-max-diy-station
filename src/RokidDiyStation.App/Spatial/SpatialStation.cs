@@ -27,6 +27,7 @@
 // None of that should take the tray app down.
 using System.IO;
 using System.Numerics;
+using RokidDiyStation.App.Input;
 using RokidDiyStation.Core.Spatial;
 using Vortice.Direct3D11;
 
@@ -50,6 +51,7 @@ public sealed class SpatialStation : IDisposable
     private DisplayGuard? _guard;
     private VirtualCursor? _cursor;
     private PointerInput? _pointerInput;
+    private SpatialInputCoordinator? _input;
 
     private Thread? _pumpThread;
     private CancellationTokenSource? _cts;
@@ -112,9 +114,22 @@ public sealed class SpatialStation : IDisposable
             () => _anchor.HasPanel ? _anchor.GetView().PanelPose : null,
             () => _anchor.GetView().View,
             () => _anchor.GetProjection());
-        _pointerInput.OnPointerEvent += e => OnPointerEvent?.Invoke(e);
+        _pointerInput.OnPointerEvent += e =>
+        {
+            OnPointerEvent?.Invoke(e);
+            ForwardPointerEvent(e);
+        };
         _pointerInput.OnPointerInsideChanged += inside => OnPointerInsideChanged?.Invoke(inside);
+        _pointerInput.OnLog += line => Log(line);
         _renderer.Cursor = _cursor;
+
+        // The input coordinator: the bridge from the virtual cursor to
+        // the projected application.  It owns a worker thread, because
+        // every CDP call is a WebSocket round trip and the render
+        // thread must never block on one.
+        _input = new SpatialInputCoordinator(() => CaptureSize);
+        _input.OnLog += line => Log(line);
+        _input.Start();
 
         // The window procedure is static, so it reaches the tracker
         // through this static hook.
@@ -176,6 +191,11 @@ public sealed class SpatialStation : IDisposable
             _cts = new CancellationTokenSource();
             _running = true;
             _renderer.Start(_anchor, display);
+
+            // The low-level mouse hook.  It is installed on its own
+            // thread with its own message pump, because the hook's
+            // callback is invoked on the installing thread.
+            _pointerInput?.StartHook();
 
             // The display guard keeps the panel window on the glasses'
             // display.  Without it, unplugging the USB-C cable makes
@@ -315,6 +335,7 @@ public sealed class SpatialStation : IDisposable
                     lock (_lock) _stopRequested = false;
                     Log($"Capturing window 0x{wanted.ToInt64():X} at {_capture.Size.Width}x{_capture.Size.Height}.");
                     SetState(SpatialState.Capturing, "Capturing");
+                    AttachInput(wanted);
                 }
                 catch (Exception ex)
                 {
@@ -335,6 +356,7 @@ public sealed class SpatialStation : IDisposable
                     _renderer.PanelTexture = null;
                     _capture.Stop();
                     SetState(SpatialState.Searching, "Not capturing");
+                    _input?.Detach();
                 }
             }
 
@@ -356,8 +378,90 @@ public sealed class SpatialStation : IDisposable
                 }
             }
 
+            // Tell the input layer where the cursor is, so a hover
+            // reaches the projected app.  Only when it has actually
+            // moved.
+            ForwardCursorPosition();
+
             Thread.Sleep(2);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Input plumbing
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Try to attach the input coordinator to the captured window.
+    /// </summary>
+    /// <remarks>
+    /// The attach is best-effort: a window that is not a debuggable
+    /// browser is still perfectly projectable, it simply is not
+    /// interactive.  Failing here must never stop the capture.
+    /// </remarks>
+    private void AttachInput(IntPtr hwnd)
+    {
+        var input = _input;
+        if (input is null) return;
+
+        var title = NativeMethods.GetTitleOf(hwnd);
+        var className = NativeMethods.GetClassNameOf(hwnd);
+        Log($"Attaching input to \"{title}\" ({className}).");
+
+        // The attach is asynchronous - it needs the HTTP endpoint and
+        // then a WebSocket - so it runs on a worker rather than
+        // blocking the pump thread.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var ok = await input.AttachAsync(hwnd, title).ConfigureAwait(false);
+                if (!ok)
+                {
+                    Log("The projected window is not interactive: no DevTools endpoint "
+                        + "matched it. Launch the browser with --remote-debugging-port=9222 "
+                        + "to enable direct interaction.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Input attach failed: {ex.Message}");
+            }
+        });
+    }
+
+    /// <summary>
+    /// Forward the cursor's movement to the input coordinator.
+    /// </summary>
+    /// <remarks>
+    /// Called from the render thread, once per frame, when the cursor
+    /// has actually moved.  The coordinator coalesces the positions,
+    /// so a fast mouse does not build up a backlog of stale hovers.
+    /// </remarks>
+    private void ForwardCursorPosition()
+    {
+        var cursor = _cursor;
+        var input = _input;
+        if (cursor is null || input is null) return;
+        if (!cursor.IsActive) return;
+        if (!cursor.IsDirty) return;
+
+        var (u, v) = cursor.Position;
+        input.CursorMoved(u, v);
+    }
+
+    /// <summary>
+    /// Forward a click or wheel tick to the projected application.
+    /// </summary>
+    private void ForwardPointerEvent(PointerEvent e)
+    {
+        var input = _input;
+        var cursor = _cursor;
+        if (input is null || cursor is null) return;
+        if (!cursor.IsActive) return;
+
+        var (u, v) = cursor.Position;
+        input.Deliver(e, u, v);
     }
 
     // -----------------------------------------------------------------
@@ -422,6 +526,8 @@ public sealed class SpatialStation : IDisposable
     public void Dispose()
     {
         Stop();
+        _input?.Dispose();
+        _pointerInput?.Dispose();
         _capture.Dispose();
         _renderer.Dispose();
         _cts?.Dispose();

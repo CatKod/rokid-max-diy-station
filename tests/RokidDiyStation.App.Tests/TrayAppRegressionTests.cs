@@ -20,7 +20,7 @@
 
 using System.Runtime.InteropServices;
 using Xunit;
-using NativeMethods = RokidDiyStation.App.NativeMethods;
+using NativeMethods = RokidDiyStation.App.HotkeyNativeMethods;
 
 namespace RokidDiyStation.App.Tests;
 
