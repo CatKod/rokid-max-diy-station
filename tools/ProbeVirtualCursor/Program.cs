@@ -355,6 +355,54 @@ internal static class Program
 
                 if (u3 >= u2)
                     failures.Add($"moving the mouse left did not move the cursor left (u {u2:F4} -> {u3:F4})");
+
+                // The GAIN has to be right, not just the direction.
+                //
+                // The cursor moves DIFFERENTIALLY: a mouse delta of D
+                // display pixels moves it by D * contentWidth /
+                // eyeWidth content pixels, which is D / eyeWidth of the
+                // panel's width.  So moving the mouse by exactly one
+                // eye's width must move the cursor across the WHOLE
+                // panel.
+                //
+                // This is the property that makes the cursor feel like
+                // a real mouse: the gain is expressed in the CONTENT's
+                // pixels, so one mouse count moves the cursor by one
+                // content pixel, whatever the capture's size is.
+                //
+                // The panel is only 50 % of the FOV wide, so the mouse
+                // would have to travel a long way to cross it - which
+                // is exactly the point.  The measurement below is done
+                // in the middle of the panel's travel, where the
+                // mapping is linear and not clamped.
+                var eyeW = RokidDisplayProfile.EyeViewportWidth(bounds.Width);
+                var (mu0, mv0) = vc.Position;
+                MoveMouseTo(centreX - 200, centreY);
+                await Task.Delay(300);
+                MoveMouseTo(centreX, centreY);
+                await Task.Delay(500);
+                var (gu0, gv0) = vc.Position;
+
+                // Move right by a quarter of an eye's width.
+                var step = (int)(eyeW * 0.25);
+                MoveMouseTo(centreX + step, centreY);
+                await Task.Delay(500);
+                var (gu1, gv1) = vc.Position;
+
+                // The expected gain: a quarter of an eye's width of
+                // mouse travel moves the cursor by a quarter of the
+                // panel's width.
+                var expectedDu = 0.25;
+                var actualDu = gu1 - gu0;
+                Console.WriteLine($"    gain check          : moved {step}px of one eye ({eyeW}px), "
+                                  + $"cursor moved {actualDu:F4} (expected {expectedDu:F4})");
+
+                if (Math.Abs(actualDu - expectedDu) > 0.02)
+                {
+                    failures.Add(
+                        $"the differential gain is wrong: {step} mouse pixels moved the cursor "
+                        + $"{actualDu:F4} of the panel's width, expected {expectedDu:F4}");
+                }
             }
 
             Console.WriteLine();
