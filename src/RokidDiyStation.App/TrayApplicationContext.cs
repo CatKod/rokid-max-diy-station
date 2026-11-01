@@ -248,7 +248,8 @@ public sealed class TrayApplicationContext
         {
             try
             {
-                var hwnd = Input.BrowserWindowFinder.WaitForWindow(url, TimeSpan.FromSeconds(15));
+                var hwnd = Input.BrowserWindowFinder.WaitForWindowOfProcess(
+                    process, TimeSpan.FromSeconds(15));
                 if (hwnd == IntPtr.Zero)
                 {
                     _mainWindow.AppendLog("The interactive browser's window did not appear in time.");

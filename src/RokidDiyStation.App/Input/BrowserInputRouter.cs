@@ -304,6 +304,50 @@ public sealed class BrowserInputRouter : IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Recompute the viewport assuming the capture IS the page.
+    /// </summary>
+    /// <remarks>
+    /// This is the fallback for the case where the window's geometry is
+    /// not known - the frame rect, the client rect and the capture's
+    /// own rectangle are all unavailable, so the only thing left to
+    /// map with is the page's own viewport.
+    ///
+    /// The mapping it produces is the identity: a texture coordinate
+    /// (u, v) lands on the page's CSS pixel (u * innerWidth,
+    /// v * innerHeight).  That is exactly right for a browser in
+    /// --app mode, where the client area is the viewport and there is
+    /// no caption bar to account for.
+    /// </remarks>
+    public async Task<bool> RefreshViewportAsync(CancellationToken token = default)
+    {
+        var raw = await ReadMetricsValueAsync(token).ConfigureAwait(false);
+        if (raw is null) return false;
+
+        var (innerWidth, innerHeight, dpr) = raw.Value;
+
+        _viewport = new ViewportRect(
+            0, 0,
+            (int)Math.Round(innerWidth * dpr),
+            (int)Math.Round(innerHeight * dpr));
+
+        if (Geometry is not null)
+        {
+            Geometry = new BrowserWindowGeometry
+            {
+                Handle = Geometry.Handle,
+                CaptureWidth = Geometry.CaptureWidth,
+                CaptureHeight = Geometry.CaptureHeight,
+                DevicePixelRatio = dpr,
+                WindowRect = Geometry.WindowRect,
+                FrameRect = Geometry.FrameRect,
+                ClientRect = Geometry.ClientRect,
+            };
+        }
+
+        return true;
+    }
+
     private ViewportRect _viewport;
 
     /// <summary>The viewport's rectangle inside the captured image.</summary>
@@ -503,6 +547,43 @@ public static class BrowserWindowFinder
             {
                 if (string.Equals(entry.Title, title, StringComparison.OrdinalIgnoreCase))
                     return entry.Handle;
+            }
+            Thread.Sleep(200);
+        }
+        return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// Wait for the main window of a browser process we launched.
+    /// </summary>
+    /// <param name="process">The browser process.</param>
+    /// <param name="timeout">How long to wait.</param>
+    /// <returns>The window handle, or zero when none appeared.</returns>
+    /// <remarks>
+    /// Matching on the PROCESS is much more reliable than matching on
+    /// the title.  In --app mode the window's title is the page's
+    /// title, which for a site like YouTube changes as the page
+    /// loads - so a title-based wait can miss the window entirely,
+    /// or latch onto the wrong one.
+    ///
+    /// The process's own main window handle is the authoritative
+    /// answer, and it is exactly the window the CDP target belongs to.
+    /// </remarks>
+    public static IntPtr WaitForWindowOfProcess(Process process, TimeSpan timeout)
+    {
+        var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        while (Environment.TickCount64 < deadline)
+        {
+            try
+            {
+                process.Refresh();
+                var handle = process.MainWindowHandle;
+                if (handle != IntPtr.Zero) return handle;
+            }
+            catch (InvalidOperationException)
+            {
+                // The process exited.
+                return IntPtr.Zero;
             }
             Thread.Sleep(200);
         }

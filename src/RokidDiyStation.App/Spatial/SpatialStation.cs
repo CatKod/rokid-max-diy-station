@@ -213,6 +213,31 @@ public sealed class SpatialStation : IDisposable
             };
             _pumpThread.Start();
 
+            // The geometry watcher keeps the coordinate mapping
+            // correct.  The browser window can be moved and resized
+            // while it is projected, and the mapping from the
+            // cursor's texture coordinate to the page's CSS pixels
+            // changes with it - so it has to be re-read periodically,
+            // not once at attach time.
+            if (_input is not null && _cts is not null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await _input.WatchGeometryAsync(_cts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The station stopped.  Nothing to do.
+                    }
+                    catch (Exception ex)
+                    {
+                        Log("Geometry watcher stopped: " + ex.Message);
+                    }
+                });
+            }
+
             if (sourceWindow != default)
                 QueueCapture(sourceWindow);
         }

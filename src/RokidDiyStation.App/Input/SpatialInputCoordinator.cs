@@ -109,6 +109,18 @@ public sealed class SpatialInputCoordinator : IDisposable
     /// <summary>True while a browser is connected and reachable.</summary>
     public bool IsInteractive => _router.IsConnected;
 
+    /// <summary>
+    /// The DevTools port to look for the browser on.
+    /// </summary>
+    /// <remarks>
+    /// Chrome's default is 9222, and that is what the browser we
+    /// launch ourselves uses.  The port is a property rather than a
+    /// constant so that a test - or a user running a second browser
+    /// for a different purpose - can point the coordinator somewhere
+    /// else.
+    /// </remarks>
+    public int Port { get; set; } = CdpDiscovery.DefaultPort;
+
     /// <summary>The window we are driving, or zero.</summary>
     public IntPtr TargetWindow => _window;
 
@@ -129,7 +141,11 @@ public sealed class SpatialInputCoordinator : IDisposable
     public async Task<bool> AttachAsync(
         IntPtr hwnd, string expectedTitle = "", string expectedUrl = "", CancellationToken token = default)
     {
-        if (hwnd == IntPtr.Zero) return false;
+        // A zero handle is allowed: the page can be identified by its
+        // title alone, and the viewport mapping then falls back to the
+        // page's own size.
+        if (hwnd == IntPtr.Zero && expectedTitle.Length == 0 && expectedUrl.Length == 0)
+            return false;
 
         _window = hwnd;
         _expectedTitle = expectedTitle;
@@ -155,18 +171,22 @@ public sealed class SpatialInputCoordinator : IDisposable
 
     private async Task<bool> DoAttachAsync(CancellationToken token)
     {
-        var title = NativeMethods.GetTitleOf(_window);
+        // A zero window handle means "there is no window to inspect" -
+        // the caller only knows the page by its title.  That is the
+        // case in the tests, and it is harmless in production, where
+        // the handle is always real.
+        var title = _window == IntPtr.Zero ? "" : NativeMethods.GetTitleOf(_window);
         if (title.Length == 0) title = _expectedTitle;
 
-        var pages = await CdpDiscovery.ListPagesAsync(CdpDiscovery.DefaultPort, token).ConfigureAwait(false);
+        var pages = await CdpDiscovery.ListPagesAsync(Port, token).ConfigureAwait(false);
         if (pages.Count == 0)
         {
-            Log("No debuggable page found on port " + CdpDiscovery.DefaultPort
+            Log("No debuggable page found on port " + Port
                 + ". Is the projected window a browser launched with --remote-debugging-port?");
             return false;
         }
 
-        var target = MatchTarget(pages, title);
+        var target = MatchTarget(pages, title, _expectedUrl);
         if (target is null)
         {
             Log("No CDP page matches the projected window's title \"" + title + "\".");
@@ -191,13 +211,30 @@ public sealed class SpatialInputCoordinator : IDisposable
     /// <summary>
     /// Find the CDP page that belongs to the projected window.
     /// </summary>
-    private static CdpTarget? MatchTarget(IReadOnlyList<CdpTarget> pages, string title)
+    /// <remarks>
+    /// The title is the strongest signal - in --app mode the window's
+    /// title IS the page's title - but a page that has not finished
+    /// loading has an EMPTY title, and then the title is useless.
+    /// The URL is the fallback: the projected window was opened from
+    /// a URL, and the CDP target reports the same one.
+    /// </remarks>
+    private static CdpTarget? MatchTarget(
+        IReadOnlyList<CdpTarget> pages, string title, string url = "")
     {
         if (title.Length > 0)
         {
             foreach (var page in pages)
             {
                 if (string.Equals(page.Title, title, StringComparison.OrdinalIgnoreCase))
+                    return page;
+            }
+        }
+
+        if (url.Length > 0)
+        {
+            foreach (var page in pages)
+            {
+                if (string.Equals(page.Url, url, StringComparison.OrdinalIgnoreCase))
                     return page;
             }
         }
@@ -366,7 +403,13 @@ public sealed class SpatialInputCoordinator : IDisposable
     {
         var (captureWidth, captureHeight) = _captureSizeProvider();
         if (captureWidth <= 0 || captureHeight <= 0) return false;
-        if (_window == IntPtr.Zero) return false;
+
+        // Without a window handle there is no geometry to read, so the
+        // page's own viewport is used instead.  That is correct for a
+        // browser in --app mode, where the client area IS the
+        // viewport.
+        if (_window == IntPtr.Zero)
+            return await _router.RefreshViewportAsync(token).ConfigureAwait(false);
 
         if (!NativeMethods.TryGetExtendedFrameBounds(_window, out var frame))
         {
