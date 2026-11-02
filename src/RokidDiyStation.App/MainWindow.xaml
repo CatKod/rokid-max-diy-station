@@ -35,13 +35,13 @@
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
                     <Button x:Name="SetAnchorBtn" Content="Set Anchor" Click="OnSetAnchorClick"
                             Padding="10,4" Margin="0,0,6,0" Background="#FF006064" Foreground="White"
-                            BorderThickness="0" Cursor="Hand" ToolTip="Anchor here (Ctrl+Space)"/>
+                            BorderThickness="0" Cursor="Hand" ToolTip="Anchor here (Ctrl+Shift+Win+Alt+Space)"/>
                     <Button x:Name="ResetAnchorBtn" Content="Reset" Click="OnResetAnchorClick"
                             Padding="10,4" Margin="0,0,6,0" Background="#FF37474F" Foreground="White"
-                            BorderThickness="0" Cursor="Hand" ToolTip="Reset anchor (Ctrl+R)"/>
+                            BorderThickness="0" Cursor="Hand" ToolTip="Reset anchor (Ctrl+Shift+Win+Alt+R)"/>
                     <Button x:Name="RecenterBtn" Content="Recenter" Click="OnRecenterClick"
                             Padding="10,4" Background="#FF455A64" Foreground="White"
-                            BorderThickness="0" Cursor="Hand" ToolTip="Recenter view (Ctrl+C)"/>
+                            BorderThickness="0" Cursor="Hand" ToolTip="Recenter view (Ctrl+Shift+Win+Alt+C)"/>
                 </StackPanel>
             </Grid>
         </Border>
