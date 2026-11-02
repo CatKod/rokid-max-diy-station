@@ -169,7 +169,7 @@ distorted OS ghost in the texture, and our 3D cursor in the air.
 
 | Stage | Goal | Files | Verified by |
 |---|---|---|---|
-| **0** | Driver installed, monitor extends at (-1920, 0), 1920x1080 | external package; `docs/IDDCX-SETUP.md` | `tools/ProbeDisplays`: the rectangle is exactly (-1920, 0, 0, 1080) |
+| **0** | Driver installed, monitor extends at (-1920, 0), 1920x1080 | external package; `docs/IDDCX-SETUP.md` | **DONE** — `tools/ProbeVirtualDisplay` passes |
 | **1** | WGC captures the *monitor* | new `src/RokidDiyStation.App/Spatial/DisplayCapture.cs` (sibling of `WindowCapture.cs`) | the panel shows the virtual monitor's whole desktop, taskbar included |
 | **2** | Cursor feedback loop | `src/RokidDiyStation.App/Spatial/PointerInput.cs` (refactored) | `tools/ProbeVirtualCursor`: the 3D cursor tracks the OS cursor to < 1 px |
 | **3** | CDP retired | delete `src/RokidDiyStation.App/Input/` (all 6 files) | a native app (Notepad, Explorer) is clickable in the glasses |
@@ -193,7 +193,90 @@ frame plumbing, the whole `RokidDiyStation.Core` fusion stack.
 
 ---
 
-## 5. The honest costs
+## 5. Stage 0 — DONE, verified on the target machine
+
+The driver is installed on this machine and the whole Stage 0 chain is
+verified by `tools/ProbeVirtualDisplay`.
+
+### What was actually done
+
+```
+winget download --id VirtualDrivers.Virtual-Display-Driver -e
+# SignPath cert → LocalMachine\TrustedPublisher + Root   (elevated)
+# devcon install MttVDD.inf Root\MttVDD                  (elevated)
+# vdd_settings.xml → DriverStore folder next to MttVDD.dll
+# device restart → the driver re-advertises its modes
+# ChangeDisplaySettingsEx → 1920x1080@60 at (-1920, 0)
+```
+
+### What the machine now reports
+
+```
+ADAPTER \\.\DISPLAY14 'Virtual Display Driver' id=Root\MttVDD
+  --- modes ---
+    1920x1080@60 bpp=32
+
+DISPLAY1  (0,0)     1920x1080  primary     desktop
+DISPLAY2  (1920,0)  1920x1080              XP-Pen Artist 13.3
+DISPLAY5  (3840,0)  1920x1080              Rokid Max
+DISPLAY14 (-1920,0) 1920x1080              ← the spatial display
+
+SM_XVIRTUALSCREEN = -1920   SM_CXVIRTUALSCREEN = 7680   SM_CMONITORS = 4
+```
+
+### The three claims, checked
+
+| Claim | Result |
+|---|---|
+| A window can be moved onto the virtual monitor | **yes** — `SetWindowPos` into its rectangle |
+| The mouse reaches it and the OS delivers clicks + focus | **yes** — `WindowFromPoint` at the cursor returned the button's own HWND; a synthesised click fired the button's `Click` handler; the form took foreground |
+| The mapping `u=(x-left)/W`, `v=(y-top)/H` holds | **yes** — a cursor at (-1691,202) on a monitor at (-1920,0) 1920x1080 maps to (0.1193, 0.1870) |
+
+The probe's own output:
+
+```
+  window at cursor: 0x6B0954 (button is 0x6B0954)
+  mapped uv     : (0.1193, 0.1870)
+  button clicks : 1
+  foreground    : 0x4B0674 (our form is 0x4B0674)
+
+PASS: the virtual monitor behaves like a real display.
+```
+
+### Three things the research could not tell us, and the machine did
+
+1. **`pnputil` is not enough.** The root devnode must be created
+   separately (`devcon install … Root\MttVDD`). The driver does not
+   appear until it does.
+2. **The settings file must sit next to `MttVDD.dll` in the DriverStore
+   folder** — `C:\Windows\System32\DriverStore\FileRepository\mttvdd.inf_*`.
+   Putting it in `C:\VirtualDisplayDriver` or `drivers\umdf` has no
+   effect. That folder is owned by TrustedInstaller, so the installer
+   must take ownership of it (`takeown` / `icacls`) before writing.
+3. **`RELOAD_DRIVER` on the named pipe does not re-read the settings.**
+   It cycles the monitor but leaves the old mode list in place. The
+   device has to be removed and re-installed for the new modes to be
+   advertised. (The pipe is nonetheless real and useful — it is how the
+   driver is told to reload.)
+
+### The mode list IS the settings
+
+The IddCx driver advertises its modes through `IddCxMonitorUpdateModes`,
+so `EnumDisplaySettings` on the virtual adapter is the ground truth for
+whether the settings file was picked up. Before the fix it listed
+`800x600@60`; after it, `1920x1080@60`.
+
+### One correction to the research
+
+The research said the driver is "signed via SignPath Foundation" and
+that the certificate therefore had to be imported. That is right, and it
+worked — but the chain is anchored in a **public** root
+(GlobalSign GCC R45 CodeSigning CA 2020), so on this machine the import
+into `TrustedPublisher` was enough. It is still an admin operation.
+
+---
+
+## 6. The honest costs
 
 1. **"Lost mouse."** The cursor leaves the physical screen when it crosses
    onto the virtual monitor. If the user takes the glasses off, the mouse
@@ -214,7 +297,7 @@ apps launched with a flag can be interacted with, at all".
 
 ---
 
-## 6. What would make this worse than CDP
+## 7. What would make this worse than CDP
 
 Honesty requires naming the failure modes:
 

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <RootNamespace>ProbeVirtualDisplay</RootNamespace>
+    <AssemblyName>ProbeVirtualDisplay</AssemblyName>
+    <!-- EnumDisplayDevices / EnumDisplaySettings are ANSI. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- The probe opens a real WinForms window on the virtual monitor. -->
+    <UseWindowsForms>true</UseWindowsForms>
+  </PropertyGroup>
+
+</Project>
