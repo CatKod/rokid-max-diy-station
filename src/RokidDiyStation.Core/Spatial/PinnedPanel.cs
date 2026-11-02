@@ -130,6 +130,34 @@ public sealed class PinnedPanel
     }
 
     /// <summary>
+    /// A copy of this panel with a different size, keeping the same
+    /// world pose.
+    /// </summary>
+    /// <remarks>
+    /// Used when the CONTENT's shape changes - the user resized the
+    /// virtual display - and the panel has to follow it.
+    ///
+    /// The pose is preserved EXACTLY: the panel stays where it is in
+    /// the room and only changes size.  Re-anchoring instead would move
+    /// the panel to wherever the user happens to be looking, which is
+    /// the same "it recentres itself" complaint in a different guise.
+    ///
+    /// The constructor derives the centre from the eye and the
+    /// direction, so handing it the anchor-time eye reproduces the same
+    /// centre exactly.
+    /// </remarks>
+    /// <param name="width">The new panel width, in metres.</param>
+    /// <param name="height">The new panel height, in metres.</param>
+    public PinnedPanel WithSize(float width, float height)
+        => new(
+            EyeAtAnchor,
+            WorldDirection,
+            Distance,
+            MathF.Max(0.01f, width),
+            MathF.Max(0.01f, height),
+            _camera);
+
+    /// <summary>
     /// The eye's world position for the given head orientation.
     /// </summary>
     public Vector3 EyePosition(in Quaternion headOrientation)

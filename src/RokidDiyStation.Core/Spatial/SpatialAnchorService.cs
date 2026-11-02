@@ -359,9 +359,25 @@ public sealed class SpatialAnchorService
     /// <summary>
     /// Tell the service the shape of the content being shown.
     /// </summary>
+    /// <remarks>
+    /// The panel's SHAPE follows the content's shape, so that nothing is
+    /// stretched.
+    ///
+    /// THE PANEL IS NOT RE-PINNED.  It used to be, which meant that
+    /// changing the virtual display's resolution teleported the panel
+    /// to wherever the user happened to be looking — the same
+    /// "it recentres itself" complaint as the cursor entering the
+    /// display, reached by a different route.  The panel's world POSE
+    /// is a property of the room; the content's shape is a property of
+    /// the content.  Changing the second must not move the first.
+    ///
+    /// Instead the panel is RESIZED IN PLACE: its centre, its normal and
+    /// its up axis are all preserved, and only its width and height
+    /// change.  See <see cref="ResizePanelInPlace"/>.
+    /// </remarks>
     /// <param name="width">The captured content's width, in pixels.</param>
     /// <param name="height">The captured content's height, in pixels.</param>
-    /// <returns>True when the aspect changed and the panel was re-pinned.</returns>
+    /// <returns>True when the aspect changed.</returns>
     public bool SetContentSize(int width, int height)
     {
         if (width <= 0 || height <= 0) return false;
@@ -370,7 +386,38 @@ public sealed class SpatialAnchorService
         if (MathF.Abs(aspect - ContentAspect) < 1e-4f) return false;
 
         ContentAspect = aspect;
+        ResizePanelInPlace();
         return true;
+    }
+
+    /// <summary>
+    /// Resize the pinned panel to the current content's shape, keeping
+    /// its world pose exactly where it is.
+    /// </summary>
+    /// <remarks>
+    /// The panel's angular width is fixed by the options (the distance
+    /// and the FOV fraction), so a change of content aspect changes the
+    /// panel's HEIGHT.  Its centre stays put, which means it grows
+    /// upwards and downwards from the middle rather than hanging off
+    /// one edge.
+    ///
+    /// The panel's pose is rebuilt from the anchor-time eye and the
+    /// panel's own world direction, so the centre comes out bit-for-bit
+    /// where it was.  That is what "in place" means here: not "close
+    /// enough", but the same centre to the last float.
+    /// </remarks>
+    public void ResizePanelInPlace()
+    {
+        lock (_panelLock)
+        {
+            if (_panel is null) return;
+
+            var width = RokidDisplayProfile.PanelWidth(
+                _options.PanelDistance, _options.PanelFovFraction, _options.DiagonalFovDegrees);
+            var height = RokidDisplayProfile.PanelHeight(width, ContentAspect);
+
+            _panel = _panel.WithSize(width, height);
+        }
     }
 
     /// <summary>
@@ -382,15 +429,21 @@ public sealed class SpatialAnchorService
     /// running, so the options cannot be baked in at construction time.
     ///
     /// Changing the distance or the FOV fraction changes the panel's
-    /// SIZE, so the panel has to be re-pinned for the change to take
-    /// effect.  Changing the comfort cone or the neck scale does not,
-    /// because those do not affect the panel's stored pose.
+    /// SIZE, so the panel has to be re-sized for the change to take
+    /// effect — but it is re-sized IN PLACE, not re-pinned.  Re-pinning
+    /// would move the panel to wherever the user is looking right now,
+    /// which is a surprise they did not ask for: they asked for a
+    /// bigger panel, not a panel somewhere else.
+    ///
+    /// Changing the comfort cone or the neck scale does not affect the
+    /// panel's size at all, because those do not affect its stored
+    /// pose.
     /// </remarks>
     public void ApplyOptions(SpatialAnchorOptions next)
     {
-        var needsRepin = next.PanelDistance != _options.PanelDistance
-                      || next.PanelFovFraction != _options.PanelFovFraction
-                      || next.DiagonalFovDegrees != _options.DiagonalFovDegrees;
+        var needsResize = next.PanelDistance != _options.PanelDistance
+                       || next.PanelFovFraction != _options.PanelFovFraction
+                       || next.DiagonalFovDegrees != _options.DiagonalFovDegrees;
 
         var modeChanged = next.WorldLock != _options.WorldLock;
 
@@ -413,11 +466,11 @@ public sealed class SpatialAnchorService
             }
         }
 
-        if (needsRepin && HasPanel)
+        if (needsResize && HasPanel)
         {
-            // Re-pin at the current gaze: the user keeps looking at the
-            // same place, the panel just gets bigger or smaller.
-            AnchorHere();
+            // Re-size in place: the panel keeps its centre, its normal
+            // and its up axis.  Only its width and height change.
+            ResizePanelInPlace();
         }
     }
 

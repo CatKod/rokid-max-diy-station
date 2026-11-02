@@ -66,6 +66,18 @@ public sealed class SpatialStation : IDisposable
     private readonly VirtualCursor _cursor = new();
     private SpatialPointerFeedback? _feedback;
 
+    /// <summary>
+    /// The anchor this station was given, when it shares one with the
+    /// tracking service.
+    /// </summary>
+    /// <remarks>
+    /// The tracking service owns the IMU stream and feeds the shared
+    /// anchor itself, so the station must not feed it a second time.
+    /// This field records WHO owns the feeding; see
+    /// <see cref="FeedImu"/>.
+    /// </remarks>
+    private readonly Core.Fusion.SpatialAnchor? _sharedAnchor;
+
     private DisplayGuard? _guard;
     private Thread? _pumpThread;
     private CancellationTokenSource? _cts;
@@ -107,6 +119,7 @@ public sealed class SpatialStation : IDisposable
         Core.Fusion.SpatialAnchor? sharedAnchor = null)
     {
         _anchor = new SpatialAnchorService(options, sharedAnchor);
+        _sharedAnchor = sharedAnchor;
         _renderer.OnError += msg => Log($"Renderer: {msg}");
         _renderer.OnFrameRate += fps => OnFrameRate?.Invoke(fps);
         _renderer.Cursor = _cursor;
@@ -131,14 +144,29 @@ public sealed class SpatialStation : IDisposable
         //
         // This is the ONLY input-related code left in the product.
         _feedback = new SpatialPointerFeedback(_cursor, FindVirtualDisplay);
-        _feedback.OnInsideChanged += inside =>
-        {
-            // Crossing onto the virtual display is the moment the
-            // cursor becomes meaningful, so that is when the panel is
-            // pinned: the user is looking at the spatial display, and
-            // the panel should be where they are looking.
-            if (inside) AnchorHere();
-        };
+
+        // Crossing onto the virtual display does NOT re-pin the panel.
+        //
+        // It used to.  The reasoning was "the cursor is meaningful over
+        // the spatial display, so that is where the panel belongs" -
+        // and the effect was that every time the user moved the mouse
+        // from one display to another, the panel TELEPORTED to wherever
+        // they happened to be looking.  The user's report was exactly
+        // that: "when I move from another screen to this one, it seems
+        // to recentre itself".
+        //
+        // The reason it is wrong is that the mouse and the head are
+        // completely independent.  The user moves the mouse to the
+        // virtual display to click something in it, which says nothing
+        // about where they are LOOKING, and nothing about where they
+        // want the panel to be.  Worse, the panel's world pose is
+        // supposed to be a property of the ROOM: a screen hanging on a
+        // wall does not jump to face you every time you walk past it.
+        //
+        // So the panel is pinned ONCE, deliberately - when the spatial
+        // display is opened, or when the user asks for it - and then it
+        // stays where it is.  The cursor entering the display only
+        // activates the 3D cursor; it does not move the panel.
     }
 
     /// <summary>True while the virtual monitor's capture is running.</summary>
@@ -382,10 +410,15 @@ public sealed class SpatialStation : IDisposable
             // which is exactly the Rokid Max's per-eye viewport, so
             // this normally changes nothing - but if the user changes
             // the virtual display's resolution, the panel follows.
+            //
+            // NOTE: the panel is NOT re-pinned here.  It used to be,
+            // which meant that changing the virtual display's
+            // resolution teleported the panel to wherever the user
+            // happened to be looking.  SetContentSize now resizes the
+            // panel in place, and this call only reports the change.
             var (cw, ch) = CaptureSize;
             if (cw > 0 && ch > 0 && _anchor.SetContentSize(cw, ch))
             {
-                _anchor.AnchorHere();
                 Log($"Panel shape follows the spatial display's aspect: {cw}x{ch}.");
             }
 
@@ -409,7 +442,41 @@ public sealed class SpatialStation : IDisposable
     /// Feed one IMU sample into the anchor.  Called from the tracking
     /// thread at ~437 Hz.
     /// </summary>
-    public void FeedImu(in RokidDiyStation.Core.Protocol.ImuSample sample) => _anchor.Update(sample);
+    /// <remarks>
+    /// This is a NO-OP when the station shares its anchor with the
+    /// tracking service, which it always does in the product.
+    ///
+    /// It used to push every sample into the anchor a SECOND time:
+    /// the tracking service already called <c>anchor.Update(sample)</c>
+    /// on the very same anchor object, and then handed the same sample
+    /// to the station, which called <c>_anchor.Update(sample)</c> again.
+    /// The anchor's fusion filter therefore saw each sample twice, with
+    /// identical timestamps.
+    ///
+    /// That is not harmless.  The Mahony filter computes its timestep
+    /// as the difference between this sample's timestamp and the
+    /// previous one; with the sample repeated, that difference is
+    /// exactly ZERO, and the filter REJECTS the sample (see
+    /// MahonyFusion.Update: "if (dtNs <= 0) return FusionResult.Rejected").
+    /// So every second sample was silently thrown away, the gyro bias
+    /// estimate was fed every sample but integrated at half rate, and
+    /// the position integrator saw every other sample's worth of
+    /// acceleration.
+    ///
+    /// The visible symptom was a slow, unexplained wander of the
+    /// anchored panel - which users read as "the panel drifts and
+    /// recentres itself".
+    /// </remarks>
+    public void FeedImu(in RokidDiyStation.Core.Protocol.ImuSample sample)
+    {
+        // Only feed the anchor ourselves when we own it.  When the
+        // anchor is SHARED with the tracking service, the tracker is
+        // already feeding it and we must not feed it again.
+        if (_sharedAnchor is not null && ReferenceEquals(_anchor.Anchor, _sharedAnchor))
+            return;
+
+        _anchor.Update(sample);
+    }
 
     /// <summary>Pin the panel where the user is currently looking.</summary>
     public void AnchorHere() => _anchor.AnchorHere();
