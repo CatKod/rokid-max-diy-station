@@ -124,9 +124,10 @@ public sealed class TrayApplicationContext
         var menu = new System.Windows.Controls.ContextMenu();
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Show settings", Command = new RelayCommand(_ => ShowMainWindow()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
-        menu.Items.Add(BuildPinSubmenu());
-        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Open an interactive browser…", Command = new RelayCommand(_ => OpenInteractiveBrowser()) });
-        menu.Items.Add(BuildAppSubmenu());
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Open the spatial display", Command = new RelayCommand(_ => OpenSpatialDisplay()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Close the spatial display", Command = new RelayCommand(_ => CloseSpatialDisplay()) });
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Bring the mouse back", Command = new RelayCommand(_ => SnapCursorHome()) });
+        menu.Items.Add(new System.Windows.Controls.Separator());
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Pin panel here (Ctrl+Space)", Command = new RelayCommand(_ => _tracking.SetAnchorHere()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Forget the panel (Ctrl+R)",     Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Recenter view (Ctrl+C)",        Command = new RelayCommand(_ => _mainWindow.Recenter()) });
@@ -136,239 +137,51 @@ public sealed class TrayApplicationContext
     }
 
     /// <summary>
-    /// The "Pin a window" submenu, listing the currently visible
-    /// top-level windows so the user can choose one to project onto
-    /// the glasses.
+    /// Attach the virtual display and start projecting it.
     /// </summary>
     /// <remarks>
-    /// The list is rebuilt every time the menu opens, because windows
-    /// come and go.  It is built on the UI thread, which is where the
-    /// menu lives.
+    /// The virtual display IS the product now.  It is a real Windows
+    /// monitor, so once it is up, every application in the system can
+    /// be dragged onto it and interacted with there - there is no
+    /// per-application launcher and no DevTools protocol.
     /// </remarks>
-    private System.Windows.Controls.MenuItem BuildPinSubmenu()
+    private void OpenSpatialDisplay()
     {
-        var pin = new System.Windows.Controls.MenuItem { Header = "Pin a window…" };
-        var refresh = new System.Windows.Controls.MenuItem
+        _mainWindow.AppendLog("Opening the spatial display…");
+        if (!_station.OpenSpatialDisplay())
         {
-            Header = "Refresh list",
-            Command = new RelayCommand(_ => RefreshPinSubmenu(pin)),
-        };
-
-        void Populate()
-        {
-            pin.Items.Clear();
-            pin.Items.Add(refresh);
-            pin.Items.Add(new System.Windows.Controls.Separator());
-
-            var windows = WindowPicker.List();
-            if (windows.Count == 0)
-            {
-                pin.Items.Add(new System.Windows.Controls.MenuItem
-                {
-                    Header = "(no capturable windows found)",
-                    IsEnabled = false,
-                });
-                return;
-            }
-
-            foreach (var w in windows.Take(30))
-            {
-                var entry = w;
-                pin.Items.Add(new System.Windows.Controls.MenuItem
-                {
-                    Header = entry.ToString(),
-                    Command = new RelayCommand(_ => PinWindow(entry.Handle)),
-                });
-            }
+            _mainWindow.AppendLog(
+                "The virtual display is not available. Install the Virtual Display "
+                + "Driver (VirtualDrivers.Virtual-Display-Driver) and try again.");
+            return;
         }
-
-        pin.SubmenuOpened += (_, _) => Populate();
-        Populate();
-        return pin;
-    }
-
-    private void RefreshPinSubmenu(System.Windows.Controls.MenuItem pin)
-    {
-        var parent = pin.Parent as System.Windows.Controls.ItemsControl;
-        var idx = parent?.Items.IndexOf(pin) ?? -1;
-        if (parent is null || idx < 0) return;
-        var replacement = BuildPinSubmenu();
-        parent.Items.RemoveAt(idx);
-        parent.Items.Insert(idx, replacement);
-    }
-
-    private void PinWindow(IntPtr hwnd)
-    {
-        _mainWindow.AppendLog($"Pinning window 0x{hwnd.ToInt64():X}.");
-        _station.QueueCapture(hwnd);
-        // Pin the panel where the user is looking RIGHT NOW, before any
-        // drift has accumulated.  The capture takes a moment to start,
-        // so the panel is placed at the pose the user had when they
-        // pressed the hotkey.
+        // Pin the panel where the user is looking, so the desktop
+        // appears in front of them rather than wherever it was last.
         _station.AnchorHere();
     }
 
+    private void CloseSpatialDisplay()
+    {
+        _mainWindow.AppendLog("Closing the spatial display…");
+        _station.CloseSpatialDisplay();
+    }
+
     /// <summary>
-    /// The "Open an interactive app…" submenu.
+    /// Bring the OS cursor back onto the physical desktop.
     /// </summary>
     /// <remarks>
-    /// This is the submenu that reaches BEYOND the browser.  Every app
-    /// in it is an Electron app - which is Chromium underneath - so it
-    /// speaks the DevTools protocol and can be driven by exactly the
-    /// same virtual cursor.
-    ///
-    /// The apps are STARTED with the debugging port open, using a
-    /// dedicated profile directory.  An app that is already running
-    /// cannot be given the switch, so the user's existing instance is
-    /// left alone and a second, drivable one is started instead.
-    ///
-    /// We verified this against VS Code: started with the switch, its
-    /// workbench received trusted mouse and keyboard events over the
-    /// protocol, and the OS mouse never moved.
+    /// The virtual display sits at NEGATIVE coordinates, so a cursor
+    /// that wandered onto it has left the physical screen and the
+    /// mouse feels lost.  This is the one-key recovery.
     /// </remarks>
-    private System.Windows.Controls.MenuItem BuildAppSubmenu()
+    private void SnapCursorHome()
     {
-        var menu = new System.Windows.Controls.MenuItem { Header = "Open an interactive app…" };
-
-        void Populate()
-        {
-            menu.Items.Clear();
-
-            var apps = Input.AppLauncher.KnownApps();
-            if (apps.Count == 0)
-            {
-                menu.Items.Add(new System.Windows.Controls.MenuItem
-                {
-                    Header = "(no supported apps found)",
-                    IsEnabled = false,
-                });
-                return;
-            }
-
-            foreach (var app in apps)
-            {
-                var entry = app;
-                menu.Items.Add(new System.Windows.Controls.MenuItem
-                {
-                    Header = entry.Name,
-                    Command = new RelayCommand(_ => OpenInteractiveApp(entry)),
-                });
-            }
-        }
-
-        menu.SubmenuOpened += (_, _) => Populate();
-        Populate();
-        return menu;
+        if (SpatialStation.SnapCursorHome())
+            _mainWindow.AppendLog("The mouse is back on the main screen.");
+        else
+            _mainWindow.AppendLog("Could not find the primary display to move the mouse to.");
     }
 
-    /// <summary>
-    /// Launch an application we can drive, and pin it.
-    /// </summary>
-    private void OpenInteractiveApp(Input.DriveableApp app)
-    {
-        var process = Input.AppLauncher.Launch(app);
-        if (process is null)
-        {
-            _mainWindow.AppendLog($"Could not launch {app.Name}.");
-            return;
-        }
-
-        _mainWindow.AppendLog($"{app.Name} launched (drivable over the DevTools protocol).");
-
-        // The window appears a moment after the process starts, so this
-        // runs on a worker thread and pins the window when it shows up.
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                // Wait for the DevTools endpoint first: without it the
-                // app cannot be driven at all, and the user should be
-                // told that rather than being left with a dead panel.
-                if (!await Input.AppLauncher.WaitForEndpointAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false))
-                {
-                    _mainWindow.AppendLog($"{app.Name} did not expose a DevTools endpoint - "
-                                        + "it cannot be driven.");
-                    return;
-                }
-
-                var hwnd = Input.BrowserWindowFinder.WaitForWindowOfProcess(
-                    process, TimeSpan.FromSeconds(20));
-                if (hwnd == IntPtr.Zero)
-                {
-                    _mainWindow.AppendLog($"{app.Name}'s window did not appear in time.");
-                    return;
-                }
-
-                _mainWindow.AppendLog($"Pinning {app.Name} (0x{hwnd.ToInt64():X}).");
-                _station.QueueCapture(hwnd);
-                _station.AnchorHere();
-            }
-            catch (Exception ex)
-            {
-                _mainWindow.AppendLog($"Could not pin {app.Name}: {ex.Message}");
-            }
-        });
-    }
-
-    /// <summary>
-    /// Launch a dedicated browser we can drive, and pin it.
-    /// </summary>
-    /// <remarks>
-    /// This is the path that makes the panel genuinely INTERACTIVE.
-    /// A browser the user already has running cannot be driven over the
-    /// DevTools protocol - Chrome only exposes that endpoint when it
-    /// was started with <c>--remote-debugging-port</c>, and it cannot
-    /// be enabled on a running instance.
-    ///
-    /// So we launch our own: a separate profile, in --app mode (no
-    /// tab strip, no address bar, so the client area IS the viewport
-    /// and the coordinate mapping is exact), with the debugging port
-    /// open.  The user's own browsing is untouched.
-    /// </remarks>
-    private void OpenInteractiveBrowser()
-    {
-        const string url = "https://www.youtube.com";
-
-        var exe = Input.BrowserLauncher.FindExecutable();
-        if (exe is null)
-        {
-            _mainWindow.AppendLog("No Chromium browser found to launch interactively.");
-            return;
-        }
-
-        var process = Input.BrowserLauncher.Launch(url);
-        if (process is null)
-        {
-            _mainWindow.AppendLog("Could not launch the interactive browser.");
-            return;
-        }
-
-        _mainWindow.AppendLog($"Interactive browser launched ({Path.GetFileName(exe)}).");
-
-        // The window appears a moment after the process starts, so this
-        // runs on a worker thread and pins the window when it shows up.
-        _ = Task.Run(() =>
-        {
-            try
-            {
-                var hwnd = Input.BrowserWindowFinder.WaitForWindowOfProcess(
-                    process, TimeSpan.FromSeconds(15));
-                if (hwnd == IntPtr.Zero)
-                {
-                    _mainWindow.AppendLog("The interactive browser's window did not appear in time.");
-                    return;
-                }
-
-                _mainWindow.AppendLog($"Pinning the interactive browser (0x{hwnd.ToInt64():X}).");
-                _station.QueueCapture(hwnd);
-                _station.AnchorHere();
-            }
-            catch (Exception ex)
-            {
-                _mainWindow.AppendLog($"Could not pin the interactive browser: {ex.Message}");
-            }
-        });
-    }
 
     private bool _started;
 
@@ -386,6 +199,25 @@ public sealed class TrayApplicationContext
         // and starts pumping frames.
         try { _station.Start(); }
         catch (Exception ex) { _mainWindow.AppendLog($"Spatial station failed to start: {ex.Message}"); }
+
+        // The spatial display is the product now, so it comes up with
+        // the app.  Attaching it is a plain ChangeDisplaySettingsEx
+        // call and needs no administrator rights; if the driver is not
+        // installed, the station keeps waiting and the user can retry
+        // from the tray menu.
+        try
+        {
+            if (_station.OpenSpatialDisplay())
+            {
+                _mainWindow.AppendLog(
+                    "The spatial display is open. Drag any window onto it, or use "
+                    + "Win+Shift+Left, and it appears in the glasses.");
+            }
+        }
+        catch (Exception ex)
+        {
+            _mainWindow.AppendLog($"The spatial display could not be opened: {ex.Message}");
+        }
 
         _mainWindow.AppendLog($"Diagnostic log mirrored to: {TrackingService.DiagnosticLogPath}");
         if (_settingsService.Current.StartMinimised)
@@ -496,19 +328,22 @@ public sealed class TrayApplicationContext
         else
             _mainWindow.AppendLog("No free hotkey found for show/hide window — use the tray icon.");
 
-        // Pin the foreground window to the glasses.  This is the
-        // primary interaction of the whole product, so it gets the
-        // easiest-to-reach combo.
-        _pinHotkey = TryHotkeyWithFallback(5, "pin foreground window", new[]
+        // Bring the mouse back to the physical screen.  The spatial
+        // display sits at NEGATIVE coordinates, so a cursor that
+        // wandered onto it has left the physical screen and the mouse
+        // feels lost.  This is the recovery action, and it gets the
+        // easiest-to-reach combo because it is the one users need
+        // most often.
+        _pinHotkey = TryHotkeyWithFallback(5, "bring the mouse back", new[]
         {
             (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x50u, "Ctrl+Alt+P"),
             (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT | HotkeyNativeMethods.MOD_SHIFT, 0x50u, "Ctrl+Alt+Shift+P"),
             (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x47u, "Ctrl+Alt+G"),
         });
         if (_pinHotkey is not null)
-            _pinHotkey.Pressed += () => PinForegroundWindow();
+            _pinHotkey.Pressed += () => SnapCursorHome();
         else
-            _mainWindow.AppendLog("No free hotkey found for pin foreground window — use the tray menu.");
+            _mainWindow.AppendLog("No free hotkey found for \"bring the mouse back\" — use the tray menu.");
     }
 
     /// <summary>
@@ -539,27 +374,6 @@ public sealed class TrayApplicationContext
         _mainWindow.AppendLog(
             $"Every candidate hotkey for \"{action}\" is owned by another app.");
         return null;
-    }
-
-    /// <summary>
-    /// Pin the window the user is currently looking at.
-    /// </summary>
-    /// <remarks>
-    /// The foreground window is the one under the mouse cursor when the
-    /// cursor is over a window, otherwise the one with keyboard focus.
-    /// We prefer the cursor's window because the user is usually
-    /// pointing at the thing they want to pin, while focus may still be
-    /// on the app they launched it from.
-    /// </remarks>
-    private void PinForegroundWindow()
-    {
-        var hwnd = WindowPicker.GetCursorWindow();
-        if (hwnd == IntPtr.Zero)
-        {
-            _mainWindow.AppendLog("No window under the cursor to pin.");
-            return;
-        }
-        PinWindow(hwnd);
     }
 
     private HotkeyBinding? TryHotkey(int id, uint modifiers, uint vk)

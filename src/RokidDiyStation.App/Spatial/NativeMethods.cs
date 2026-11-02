@@ -336,6 +336,22 @@ public static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetCursorPos(out POINT lpPoint);
 
+    /// <summary>
+    /// Move the OS cursor to an absolute virtual-desktop position.
+    /// </summary>
+    /// <remarks>
+    /// This is the "bring the mouse home" escape hatch.  The virtual
+    /// display sits at NEGATIVE coordinates, so a cursor that wandered
+    /// onto it has left the physical screen entirely and the mouse
+    /// feels lost.  One call to this brings it back.
+    ///
+    /// It is deliberately NOT used for the cursor's normal movement:
+    /// the OS owns the cursor, and we only read it.
+    /// </remarks>
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetCursorPos(int x, int y);
+
     /// <summary>Virtual key codes we care about.</summary>
     public const int VK_SHIFT = 0x10;
     public const int VK_CONTROL = 0x11;

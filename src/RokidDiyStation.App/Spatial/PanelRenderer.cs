@@ -122,8 +122,8 @@ public sealed class PanelRenderer : IDisposable
     /// <remarks>
     /// The renderer only READS it — it draws the cursor at whatever
     /// position the cursor currently holds.  The cursor's position is
-    /// owned by <see cref="PointerInput"/>, which is the thing that
-    /// talks to the mouse.
+    /// owned by <see cref="SpatialPointerFeedback"/>, which reads the
+    /// OS cursor and maps it into the panel's texture space.
     /// </remarks>
     public VirtualCursor? Cursor
     {
@@ -170,6 +170,27 @@ public sealed class PanelRenderer : IDisposable
         set => _panelSrv = value;
     }
 
+    /// <summary>
+    /// Called on the RENDER THREAD, just before each frame is drawn.
+    /// </summary>
+    /// <remarks>
+    /// This is where the capture pulls its newest frame.
+    ///
+    /// It has to be HERE, on the render thread, because the copy from
+    /// the captured surface into our own texture is issued on the
+    /// device's immediate context - and an ID3D11DeviceContext is not
+    /// thread-safe.  When the capture ran on a separate thread, its
+    /// CopyResource calls interleaved with the renderer's draw calls
+    /// on the same context.  The symptom was baffling: the capture
+    /// reported a perfect, live frame, the renderer's frame rate was
+    /// 60 fps, and the panel was completely black.
+    ///
+    /// The callback is expected to be cheap and non-blocking.  If it
+    /// throws, the frame is simply drawn without new content rather
+    /// than taking the render loop down.
+    /// </remarks>
+    public Action? BeforeDraw { get; set; }
+
     /// <summary>True once the D3D pipeline is up.</summary>
     public bool IsReady => _device is not null;
 
@@ -180,14 +201,20 @@ public sealed class PanelRenderer : IDisposable
     public IntPtr WindowHandle => _hwnd;
 
     /// <summary>
-    /// The physical mouse tracker, once the window exists.
+    /// The panel window's message handler needs no input hook.
     /// </summary>
     /// <remarks>
-    /// The window procedure is static, so it cannot reach an instance
-    /// member directly.  This static hook is how the messages get
-    /// from the window procedure to the instance's input handler.
+    /// The window procedure used to forward the mouse messages to a
+    /// WH_MOUSE_LL tracker.  That is gone: the virtual display is a
+    /// real Windows display, so the OS delivers the clicks itself, and
+    /// the only thing we needed the messages for was the old
+    /// differential cursor mapping, which the absolute mapping in
+    /// <see cref="SpatialPointerFeedback"/> replaces.
+    ///
+    /// What the window procedure still handles is the display topology
+    /// (WM_DISPLAYCHANGE / WM_DEVICECHANGE), which is about keeping
+    /// the window on the glasses - not about input.
     /// </remarks>
-    public static PointerInput? CurrentPointerInput { get; set; }
 
     /// <summary>
     /// Ask the render thread to measure how much of the panel is lit,
@@ -424,7 +451,7 @@ public sealed class PanelRenderer : IDisposable
     /// The panel window's message handler.
     /// </summary>
     /// <remarks>
-    /// Four things matter here:
+    /// Three things matter here:
     ///
     ///  * WM_MOUSEACTIVATE — the user clicks on the glasses' display.
     ///   Returning MA_NOACTIVATE stops Windows from giving our window
@@ -441,12 +468,6 @@ public sealed class PanelRenderer : IDisposable
     ///   back instantly.  The mouse is still fully tracked while
     ///   hidden, which is what the virtual cursor needs.
     ///
-    ///  * WM_MOUSEMOVE / WM_LBUTTONDOWN / … — the actual input for
-    ///   the virtual cursor.  The panel is an opaque window covering
-    ///   the whole output, so these messages arrive even though
-    ///   WS_EX_TRANSPARENT is set (that flag is about painting order,
-    ///   not hit-testing).
-    ///
     ///  * WM_DISPLAYCHANGE / WM_DEVICECHANGE — the glasses were
     ///   unplugged or re-plugged.  The check has to happen HERE,
     ///   synchronously, because DWM relocates windows on a vanished
@@ -454,6 +475,11 @@ public sealed class PanelRenderer : IDisposable
     ///   this message.  By the time a timer or a poll noticed, our
     ///   borderless 1920x1080 topmost window would already be
     ///   covering the user's laptop screen.
+    ///
+    /// The mouse messages are deliberately not handled: the pointer
+    /// over the glasses' display is not the pointer over the virtual
+    /// display the panel shows, and the OS handles the interaction
+    /// with the latter on its own.
     /// </remarks>
     private static IntPtr PanelWindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
     {
@@ -482,7 +508,18 @@ public sealed class PanelRenderer : IDisposable
             case NativeMethods.WM_MBUTTONUP:
             case NativeMethods.WM_MOUSEWHEEL:
             case NativeMethods.WM_MOUSELEAVE:
-                CurrentPointerInput?.HandleMouseMessage(msg, wParam, lParam);
+                // Deliberately NOT handled.
+                //
+                // The mouse messages that arrive here are the pointer
+                // moving over the GLASSES' display, which is where our
+                // 3D panel is drawn - not over the virtual display the
+                // panel SHOWS.  The real interaction happens on the
+                // virtual display, where the OS delivers it natively.
+                //
+                // Forwarding these to an input hook used to be how the
+                // cursor was tracked.  Now the cursor is read from the
+                // OS's own cursor position, so there is nothing to do
+                // with them.
                 break;
 
             case NativeMethods.WM_DISPLAYCHANGE:
@@ -930,10 +967,6 @@ public sealed class PanelRenderer : IDisposable
 
             try
             {
-                // Poll the physical mouse before drawing: the cursor's
-                // new position has to be in this frame's vertex buffer.
-                CurrentPointerInput?.Poll();
-
                 DrawFrame();
             }
             catch (Exception ex)
@@ -977,6 +1010,19 @@ public sealed class PanelRenderer : IDisposable
     private void DrawFrame()
     {
         if (_context is null || _swapChain is null || _backBuffer is null) return;
+
+        // Pull the newest captured frame.  This runs on the render
+        // thread because the capture's GPU copy shares this device's
+        // immediate context, and that context is not thread-safe.
+        //
+        // The callback sets PanelTexture, which is read a few lines
+        // below - so by the time the draw happens, the panel's
+        // texture is the frame that was just captured.
+        try { BeforeDraw?.Invoke(); }
+        catch (Exception ex)
+        {
+            OnError?.Invoke($"Capture update failed: {ex.Message}");
+        }
 
         // Pure black: on the Micro-OLED panels a black pixel emits no
         // light, so the area around the panel is optically transparent
@@ -1078,6 +1124,25 @@ public sealed class PanelRenderer : IDisposable
                     _context.OMSetDepthStencilState(null, 0);
                     _context.IASetVertexBuffer(0, _vertexBuffer, 20, 0);
                     _context.VSSetShader(_vertexShader);
+
+                    // The constant buffer holds the MVP matrix, and the
+                    // VERTEX shader is what reads it:
+                    //
+                    //     output.position = mul(float4(position, 1.0f), mvp);
+                    //
+                    // So it has to be bound to the VERTEX stage.  Binding
+                    // it only to the pixel stage - which is what this
+                    // used to do - leaves the vertex shader reading an
+                    // unbound register, which D3D11 defines as ZERO.  A
+                    // zero matrix collapses the whole quad to a single
+                    // degenerate point at the origin, so nothing is
+                    // rasterised and the panel comes out completely
+                    // black: a 0 % coverage reading, with the capture
+                    // reporting a perfectly good frame right next to it.
+                    //
+                    // The pixel stage also needs the buffer, for the UV
+                    // transform.
+                    _context.VSSetConstantBuffer(0, _constantBuffer);
                     _context.PSSetShader(_pixelShader);
                     _context.PSSetConstantBuffer(0, _constantBuffer);
                     _context.PSSetSampler(0, _sampler);

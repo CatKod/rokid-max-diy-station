@@ -104,6 +104,18 @@ public sealed class DisplayCapture : IDisposable
     }
 
     /// <summary>
+    /// The most recent captured frame, as a shader resource view.
+    /// </summary>
+    /// <remarks>
+    /// Named to match WindowCapture.Texture, so the renderer does not
+    /// have to care which kind of capture is feeding it.
+    /// </remarks>
+    public ID3D11ShaderResourceView? Texture
+    {
+        get { lock (_lock) return _srv; }
+    }
+
+    /// <summary>
     /// Our own copy of the captured frame, as a texture.
     /// </summary>
     /// <remarks>
@@ -112,7 +124,7 @@ public sealed class DisplayCapture : IDisposable
     /// because a shader resource view cannot be the source of a
     /// CopyResource.
     /// </remarks>
-    public ID3D11Texture2D? Texture
+    public ID3D11Texture2D? CapturedTexture
     {
         get { lock (_lock) return _copyTexture; }
     }
@@ -199,6 +211,21 @@ public sealed class DisplayCapture : IDisposable
     /// Pull the newest frame, if there is one, and refresh the shader
     /// resource view.
     /// </summary>
+    /// <remarks>
+    /// THIS MUST BE CALLED ON THE RENDER THREAD.
+    ///
+    /// The copy is issued on the device's immediate context, and an
+    /// ID3D11DeviceContext is NOT thread-safe.  If the capture ran on
+    /// a different thread from the renderer, the two would interleave
+    /// their calls on the same context and the result was undefined
+    /// behaviour - in practice the renderer's draw calls were
+    /// silently dropped, and the panel came out completely black
+    /// while the capture itself reported a perfectly good frame.
+    ///
+    /// So the station hands the renderer a callback and the renderer
+    /// pulls the frame itself, on its own thread, just before it
+    /// draws.  See <see cref="RokidDiyStation.App.Spatial.PanelRenderer.BeforeDraw"/>.
+    /// </remarks>
     public void TryUpdate()
     {
         Direct3D11CaptureFramePool? pool;
@@ -257,6 +284,11 @@ public sealed class DisplayCapture : IDisposable
                 // The GPU-side copy.  This MUST happen while the frame
                 // is alive, because the frame pool recycles the source
                 // texture the moment the frame is released.
+                //
+                // The context is the device's own immediate context.
+                // It is BORROWED, never disposed: it belongs to the
+                // device, and disposing it would tear the renderer's
+                // pipeline down.
                 _context ??= _device.ImmediateContext;
                 _context.CopyResource(_copyTexture, texture);
             }
@@ -284,7 +316,9 @@ public sealed class DisplayCapture : IDisposable
             _srv = null;
             _copyTexture?.Dispose();
             _copyTexture = null;
-            _context?.Dispose();
+            // NOTE: _context is BORROWED from the device - it is
+            // _device.ImmediateContext, which the renderer also uses.
+            // Disposing it here would break the renderer's pipeline.
             _context = null;
             SourceMonitor = IntPtr.Zero;
         }

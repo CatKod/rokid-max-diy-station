@@ -60,15 +60,29 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="Source window" VerticalAlignment="Center"/>
-                <ComboBox Grid.Row="0" Grid.Column="1" x:Name="WindowPickerBox" Margin="8,0,8,0"
-                          DisplayMemberPath="Title" SelectionChanged="OnWindowSelected"
-                          DropDownOpened="OnWindowPickerDropDownOpened"
-                          ToolTip="The window to project onto the glasses. The list is re-scanned every time you open it."/>
-                <Button Grid.Row="0" Grid.Column="2" Content="Pin it" Click="OnPinClick" Padding="12,4"
-                        Background="#FF006064" Foreground="White" BorderThickness="0" Cursor="Hand"/>
-                <Button Grid.Row="0" Grid.Column="3" Content="↻" Click="OnRefreshWindowsClick" Padding="10,4"
-                        ToolTip="Re-scan the list of windows" Cursor="Hand"/>
+                <!--
+                    The source of the panel's content.
+
+                    There is no longer a window picker.  The panel
+                    shows a whole VIRTUAL DISPLAY - a real Windows
+                    monitor that the user drags windows onto - so
+                    there is nothing to choose from a list.  The
+                    button opens or closes it.
+
+                    The display's state is shown live, because the
+                    single most common failure is that the driver is
+                    not installed, and the user needs to know that
+                    without having to open a terminal.
+                -->
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Spatial display" VerticalAlignment="Center"
+                           ToolTip="The virtual Windows monitor shown in the glasses. Drag any window onto it."/>
+                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="VirtualDisplayText" Margin="8,0,8,0"
+                           VerticalAlignment="Center" Foreground="#FF80CBC4"
+                           Text="(checking…)"
+                           ToolTip="The virtual display's state: its resolution and where it sits on the desktop."/>
+                <Button Grid.Row="0" Grid.Column="2" Content="Open / close" Click="OnPinClick" Padding="12,4"
+                        Background="#FF006064" Foreground="White" BorderThickness="0" Cursor="Hand"
+                        ToolTip="Attach or detach the virtual display. Needs no administrator rights."/>
 
                 <!--
                     The world-lock mode is the single most important

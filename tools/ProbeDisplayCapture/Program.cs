@@ -95,7 +95,7 @@ internal static class Program
                 System.Threading.Thread.Sleep(50);
             }
 
-            var texture = capture.Texture;
+            var texture = capture.CapturedTexture;
             if (texture is null)
             {
                 Console.WriteLine("FAIL: the capture produced no texture.");

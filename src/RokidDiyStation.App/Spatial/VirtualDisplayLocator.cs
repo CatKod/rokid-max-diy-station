@@ -138,20 +138,38 @@ public static class VirtualDisplayLocator
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool GetMonitorInfo(IntPtr h, ref MONITORINFOEX mi);
 
-    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+    // NOTE the charset: DisplayNative.DISPLAY_DEVICE marshals its
+    // strings with the struct's own CharSet, which is Unicode.  So
+    // these have to be the W variants.  Calling the A variants
+    // instead makes the API write ANSI bytes into a UTF-16 buffer,
+    // and the device IDs come back garbled - which is why the
+    // virtual monitor's "MTT1337" fingerprint stopped matching and
+    // the display could not be found.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool EnumDisplayDevices(
         string? device, uint devNum, ref DisplayNative.DISPLAY_DEVICE display, uint flags);
 
-    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool EnumDisplaySettings(
         string? deviceName, int mode, ref DisplayNative.DEVMODE dm);
 
-    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int ChangeDisplaySettingsEx(
         string? deviceName, ref DisplayNative.DEVMODE dm, IntPtr hwnd, uint flags, IntPtr param);
 
     private const uint CDS_UPDATEREGISTRY = 0x00000001;
     private const uint CDS_TEST = 0x00000002;
+
+    // The codes ChangeDisplaySettingsEx returns.
+    //
+    // The important one is DISP_CHANGE_RESTART: the mode is perfectly
+    // acceptable, but the system has to be restarted for it to take
+    // effect.  Treating it as "rejected" would make the attach fail
+    // on machines where the virtual display's driver asks for one.
+    private const int DISP_CHANGE_SUCCESSFUL = 0;
+    private const int DISP_CHANGE_RESTART = 1;
+    private const int DISP_CHANGE_UPDATECONTENT = 2;
+    private const int DISP_CHANGE_FAILED = -1;
 
     private const int DM_POSITION = 0x00000020;
     private const int DM_BITSPERPEL = 0x00040000;
@@ -303,11 +321,17 @@ public static class VirtualDisplayLocator
 
         // Ask Windows whether the mode is acceptable before applying it,
         // so a rejected mode does not tear the desktop down.
+        //
+        // DISP_CHANGE_RESTART means "acceptable, but it needs a
+        // restart" - it is NOT a rejection, so it must not abort the
+        // attach.
         var test = dm;
-        if (ChangeDisplaySettingsEx(adapter, ref test, IntPtr.Zero, CDS_TEST, IntPtr.Zero) != 0)
+        var testResult = ChangeDisplaySettingsEx(adapter, ref test, IntPtr.Zero, CDS_TEST, IntPtr.Zero);
+        if (testResult == DISP_CHANGE_FAILED)
             return false;
 
-        return ChangeDisplaySettingsEx(adapter, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero) == 0;
+        var result = ChangeDisplaySettingsEx(adapter, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero);
+        return result != DISP_CHANGE_FAILED;
     }
 
     /// <summary>

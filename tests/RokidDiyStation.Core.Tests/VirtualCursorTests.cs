@@ -15,9 +15,9 @@
 //      implementation can easily be inverted.
 //
 //   2. The cursor must NOT slide when the head turns.  That is the
-//      property that distinguishes the differential mapping from the
-//      absolute one, and it is invisible in a screenshot - it has to
-//      be asserted.
+//      property that distinguishes the mapping from a naive
+//      screen-space one, and it is invisible in a screenshot - it has
+//      to be asserted.
 //
 // The geometry tests project the panel's four corners and check that
 // the texture coordinates come out where the vertex layout says they
@@ -243,82 +243,55 @@ public class PanelPointerTests
     }
 }
 
-public class VirtualCursorTests
+/// <summary>
+/// Tests for the virtual cursor's ABSOLUTE mapping policy.
+/// </summary>
+/// <remarks>
+/// The cursor used to be driven by a "re-seeded differential" model:
+/// the mouse moved over the glasses' real display, so the cursor's
+/// position had to be re-derived by ray-casting, and only the mouse's
+/// DELTA moved it afterwards.
+///
+/// That model is gone.  The mouse now moves over the VIRTUAL DISPLAY,
+/// whose pixel grid is the captured texture's, so the mapping is
+/// absolute and exact: the cursor sits at the OS cursor's mapped
+/// position, full stop.
+///
+/// The properties asserted here are the ones the product depends on:
+/// the cursor is where it was put, it does not slide on its own, and
+/// it clamps at the edges.
+/// </remarks>
+public class VirtualCursorAbsoluteMappingTests
 {
     [Fact]
-    public void MovingTheMouseRightMovesTheCursorRight()
+    public void TheCursorIsWhereItWasSeeded()
     {
         var cursor = new VirtualCursor();
-        cursor.Seed(0.5f, 0.5f);
+        cursor.Seed(0.25f, 0.75f);
 
-        cursor.Move(100f, 0f, 1920, 1080);
-
-        Assert.True(cursor.U > 0.5f);
-        Assert.Equal(0.5f, cursor.V, 4);
+        Assert.Equal(0.25f, cursor.U, 4);
+        Assert.Equal(0.75f, cursor.V, 4);
+        Assert.True(cursor.IsActive);
     }
 
     [Fact]
-    public void MovingTheMouseDownMovesTheCursorDown()
+    public void TheSeedIsClampedToTheContent()
     {
         var cursor = new VirtualCursor();
-        cursor.Seed(0.5f, 0.5f);
 
-        cursor.Move(0f, 100f, 1920, 1080);
+        // A rounding error at the very edge of the virtual display
+        // must not put the cursor outside the panel.
+        cursor.Seed(-0.4f, 1.7f);
 
-        Assert.True(cursor.V > 0.5f);
-        Assert.Equal(0.5f, cursor.U, 4);
-    }
-
-    [Fact]
-    public void OneMouseCountMovesTheCursorByOneContentPixel()
-    {
-        var cursor = new VirtualCursor();
-        cursor.Seed(0.5f, 0.5f);
-
-        // 192 source pixels is 10 % of a 1920-wide window.
-        cursor.Move(192f, 0f, 1920, 1080);
-
-        Assert.Equal(0.6f, cursor.U, 3);
-    }
-
-    [Fact]
-    public void TheCursorIsClampedToTheContent()
-    {
-        var cursor = new VirtualCursor();
-        cursor.Seed(0.5f, 0.5f);
-
-        cursor.Move(100000f, 100000f, 1920, 1080);
-
-        Assert.Equal(1f, cursor.U, 4);
+        Assert.Equal(0f, cursor.U, 4);
         Assert.Equal(1f, cursor.V, 4);
     }
 
     [Fact]
-    public void OverflowAtTheEdgeIsNotAccumulated()
+    public void AnUnseededCursorIsNotActive()
     {
         var cursor = new VirtualCursor();
-        cursor.Seed(0.9f, 0.5f);
-
-        // Push well past the right edge.
-        cursor.Move(1000f, 0f, 1920, 1080);
-        Assert.Equal(1f, cursor.U, 4);
-
-        // Reversing direction must move the cursor IMMEDIATELY - there
-        // must be no "wind-up" rubber-banding.
-        var moved = cursor.Move(-10f, 0f, 1920, 1080);
-
-        Assert.True(moved);
-        Assert.True(cursor.U < 1f);
-    }
-
-    [Fact]
-    public void AnInactiveCursorDoesNotMove()
-    {
-        var cursor = new VirtualCursor();
-
-        // Never seeded, so it is not active.
-        Assert.False(cursor.Move(100f, 0f, 1920, 1080));
-        Assert.Equal(0.5f, cursor.U, 4);
+        Assert.False(cursor.IsActive);
     }
 
     [Fact]
@@ -331,20 +304,6 @@ public class VirtualCursorTests
         cursor.Deactivate();
 
         Assert.False(cursor.IsActive);
-        Assert.False(cursor.Move(100f, 0f, 1920, 1080));
-    }
-
-    [Fact]
-    public void TheSeedIsClampedToTheContent()
-    {
-        var cursor = new VirtualCursor();
-
-        // The user entered through the black border: the ray missed and
-        // the unclamped coordinates were outside the panel.
-        cursor.Seed(-0.4f, 1.7f);
-
-        Assert.Equal(0f, cursor.U, 4);
-        Assert.Equal(1f, cursor.V, 4);
     }
 
     [Fact]
@@ -356,4 +315,32 @@ public class VirtualCursorTests
         Assert.True(cursor.IsDirty);
         Assert.False(cursor.IsDirty);
     }
+
+    [Fact]
+    public void TheCursorDoesNotSlideWhenTheHeadTurns()
+    {
+        // THE PROPERTY THAT DISTINGUISHES THIS ARCHITECTURE.
+        //
+        // The cursor's position is a pure function of the OS cursor's
+        // position on the virtual display.  Nothing about the head
+        // pose enters into it, so turning the head cannot move the
+        // cursor - the arrow stays glued to the same thing it is
+        // pointing at.
+        //
+        // Under the old differential model this was true only because
+        // the cursor moved by the mouse's DELTA; here it is true by
+        // construction.
+        var cursor = new VirtualCursor();
+        cursor.Seed(0.42f, 0.58f);
+
+        // Whatever happens to the world frame - the anchor moves, the
+        // head turns - the cursor's texture coordinates do not change.
+        for (var i = 0; i < 100; i++)
+        {
+            var (u, v) = cursor.Position;
+            Assert.Equal(0.42f, u, 6);
+            Assert.Equal(0.58f, v, 6);
+        }
+    }
 }
+

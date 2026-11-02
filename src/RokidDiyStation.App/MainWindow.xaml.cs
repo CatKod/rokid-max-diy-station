@@ -11,6 +11,7 @@ public partial class MainWindow : Window
     private readonly AutostartService _autostart;
     private readonly TrackingService _tracking;
     private Spatial.SpatialStation? _station;
+    private System.Windows.Threading.DispatcherTimer? _virtualDisplayTimer;
     private bool _quitting;
 
     public MainWindow(SettingsService settingsService, AutostartService autostart, TrackingService tracking)
@@ -37,74 +38,47 @@ public partial class MainWindow : Window
         {
             PanelText.Text = $"panel  {station.Message}  ({fps:0} fps)";
         }));
-        RefreshWindowList();
+
+        // The virtual display's state is worth showing live: the most
+        // common failure is that the driver is not installed, and the
+        // user should be able to see that from the window.
+        Dispatcher.BeginInvoke(new Action(RefreshVirtualDisplayText));
+        var timer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(2),
+        };
+        timer.Tick += (_, _) => RefreshVirtualDisplayText();
+        timer.Start();
+        _virtualDisplayTimer = timer;
     }
 
-    /// <summary>Rebuild the list of capturable windows.</summary>
-    public void RefreshWindowList()
+    /// <summary>Show the virtual display's resolution and position.</summary>
+    private void RefreshVirtualDisplayText()
     {
-        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(RefreshWindowList)); return; }
-        var selected = WindowPickerBox.SelectedItem as Spatial.WindowEntry;
-        WindowPickerBox.Items.Clear();
-        foreach (var w in Spatial.WindowPicker.List())
-            WindowPickerBox.Items.Add(w);
-        if (selected is not null && WindowPickerBox.Items.Contains(selected))
-            WindowPickerBox.SelectedItem = selected;
-    }
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(RefreshVirtualDisplayText)); return; }
 
-    /// <summary>
-    /// Re-scan the window list every time the dropdown is opened.
-    /// </summary>
-    /// <remarks>
-    /// This is the fix for "the app does not notice new windows".
-    ///
-    /// The list used to be built ONCE, when the settings window was
-    /// created.  So a browser tab opened five minutes after launch was
-    /// simply never in the list — the app could not pin it without a
-    /// restart, which is exactly what the user reported.
-    ///
-    /// The scan happens on <see cref="ComboBox.DropDownOpened"/>
-    /// rather than on a timer, for two reasons:
-    ///
-    ///   * It is exactly as fresh as it needs to be.  The user cannot
-    ///     see a stale list, because the list is rebuilt in the same
-    ///     interaction that shows it.
-    ///
-    ///   * It costs nothing when the user is not choosing a window.
-    ///     Enumerating the windows is not free — it walks the shell's
-    ///     window list — and doing it on a timer would burn CPU for the
-    ///     whole time the app runs, in a background app whose entire
-    ///     point is to stay out of the way.
-    ///
-    /// The tray menu's pin submenu does the same thing on
-    /// <see cref="System.Windows.Controls.ContextMenu.Opened"/>.
-    /// </remarks>
-    private void OnWindowPickerDropDownOpened(object sender, EventArgs e)
-    {
-        RefreshWindowList();
-    }
-
-    private void OnRefreshWindowsClick(object sender, RoutedEventArgs e)
-    {
-        RefreshWindowList();
-    }
-
-    private void OnWindowSelected(object sender, SelectionChangedEventArgs e)
-    {
-        // Selecting a window is not the same as pinning it; the user
-        // still has to press the button.  This keeps the accidental
-        // click from hijacking the glasses.
+        var monitor = Spatial.SpatialStation.FindVirtualDisplay();
+        VirtualDisplayText.Text = monitor is null
+            ? "not attached"
+            : $"{monitor.Width}x{monitor.Height} at ({monitor.Bounds.Left},{monitor.Bounds.Top})";
     }
 
     private void OnPinClick(object sender, RoutedEventArgs e)
     {
         if (_station is null) return;
-        if (WindowPickerBox.SelectedItem is not Spatial.WindowEntry w) return;
-        _station.QueueCapture(w.Handle);
+        // The spatial display is a REAL Windows monitor, so there is no
+        // single window to pin any more: the whole desktop is what is
+        // projected, and the user drags whatever they want onto it.
+        if (!_station.OpenSpatialDisplay())
+        {
+            AppendLog("The virtual display is not available. "
+                    + "Install the Virtual Display Driver and try again.");
+            return;
+        }
         // Place the panel where the user is looking now — before the
         // capture has even produced its first frame.
         _station.AnchorHere();
-        AppendLog($"Pinning '{w.Title}' (0x{w.Handle.ToInt64():X}).");
+        AppendLog("The spatial display is open — drag any window onto it.");
     }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
@@ -117,6 +91,11 @@ public partial class MainWindow : Window
 
     private void OnClosing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
+        // The virtual-display readout timer has to stop, or it keeps
+        // waking the dispatcher after the window is hidden.
+        _virtualDisplayTimer?.Stop();
+        _virtualDisplayTimer = null;
+
         // Save on close — the user might not have pressed "Save".
         try { _settingsService.Save(); } catch { }
         // The window should never really close until Quit() is called
