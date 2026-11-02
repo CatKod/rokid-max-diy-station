@@ -58,11 +58,22 @@ namespace RokidDiyStation.App.Input;
 /// True when the application keeps its state in a profile directory
 /// that has to be redirected for the instance we start.
 /// </param>
+/// <param name="ProfileKey">
+/// The folder name used for the instance's profile directory.  It
+/// defaults to the application's name, but a name with characters the
+/// file system treats specially - or with characters outside ASCII -
+/// is better given an explicit, boring key.
+/// </param>
 public sealed record DriveableApp(
     string Name,
     string Executable,
     string[]? Arguments = null,
-    bool ProfileDirectory = true);
+    bool ProfileDirectory = true,
+    string? ProfileKey = null)
+{
+    /// <summary>The name of this application's profile folder.</summary>
+    public string ProfileName => ProfileKey ?? Name;
+}
 
 /// <summary>
 /// Starts applications that speak the DevTools protocol.
@@ -160,6 +171,46 @@ public static class AppLauncher
                 Path.Combine(local, "Figma", "Figma.exe")),
         });
 
+        // COC COC - a Chromium derivative.  Its layout is the modern
+        // Chromium one, not Squirrel's: the executable sits directly in
+        // "Browser\Application" and the real code lives in a
+        // "browser.dll" inside a versioned folder underneath it.  The
+        // launcher at "Application\browser.exe" IS the real binary -
+        // it forwards Chromium's command line switches, which we
+        // verified: launched with --remote-debugging-port it answered
+        // on /json/version with "Chrome/154.0.8037.106".
+        //
+        // Unlike the Squirrel apps, a separate instance with its own
+        // profile coexists with the user's own Cốc Cốc window: the
+        // dedicated --user-data-dir keeps the two apart.
+        var cocCocRoots = new[]
+        {
+            Path.Combine(programFiles, "CocCoc", "Browser", "Application", "browser.exe"),
+            Path.Combine(local, "CocCoc", "Browser", "Application", "browser.exe"),
+        };
+
+        if (!string.IsNullOrEmpty(programFilesX86))
+        {
+            cocCocRoots = cocCocRoots
+                .Append(Path.Combine(programFilesX86, "CocCoc", "Browser", "Application", "browser.exe"))
+                .ToArray();
+        }
+
+        foreach (var exe in cocCocRoots)
+        {
+            candidates.Add(new DriveableApp(
+                "Cốc Cốc",
+                exe,
+                // A start page, so the window that appears has content
+                // to show and the coordinate mapping has something to
+                // measure.
+                new[] { "--app=https://www.google.com" },
+                ProfileDirectory: true,
+                // The display name has diacritics; the profile folder
+                // is better off with a plain ASCII key.
+                ProfileKey: "CoCoc"));
+        }
+
         // The 32-bit Program Files folder is where a lot of software
         // still lands, and where a machine without the 64-bit one puts
         // everything.
@@ -208,7 +259,7 @@ public static class AppLauncher
             // fight with the one the user already has open.  Chromium
             // refuses to open a second instance on the same profile,
             // and Electron inherits that behaviour.
-            var profile = Path.Combine(ProfileRoot, Sanitize(app.Name));
+            var profile = Path.Combine(ProfileRoot, Sanitize(app.ProfileName));
             Directory.CreateDirectory(profile);
             psi.ArgumentList.Add($"--user-data-dir={profile}");
         }

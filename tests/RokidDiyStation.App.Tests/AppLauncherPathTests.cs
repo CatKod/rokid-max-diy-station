@@ -118,4 +118,29 @@ public sealed class AppLauncherPathTests : IDisposable
 
         Assert.Null(found);
     }
+
+    /// <summary>
+    /// A display name with characters the file system treats specially
+    /// still has to produce a usable profile folder.
+    /// </summary>
+    /// <remarks>
+    /// The name is only a LABEL.  What goes on disk is the profile key,
+    /// so an application whose name carries diacritics - Cốc Cốc - can
+    /// use a plain ASCII key and keep its profile folder boring.
+    /// </remarks>
+    [Fact]
+    public void The_profile_folder_uses_the_key_not_the_display_name()
+    {
+        var app = new DriveableApp("Cốc Cốc", "browser.exe", ProfileKey: "CoCoc");
+
+        Assert.Equal("CoCoc", app.ProfileName);
+    }
+
+    [Fact]
+    public void Without_a_key_the_display_name_is_the_profile_folder()
+    {
+        var app = new DriveableApp("Slack", "slack.exe");
+
+        Assert.Equal("Slack", app.ProfileName);
+    }
 }

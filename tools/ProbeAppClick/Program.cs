@@ -184,10 +184,16 @@ internal static class Program
         // single-page application re-renders its own DOM, which wipes
         // any listener attached earlier - installing it up front and
         // clicking later measures the application, not the input path.
+        //
+        // Note: no "return" statement.  Runtime.evaluate runs the
+        // expression at the top level, where "return" is a syntax
+        // error - the whole statement then fails and the recorder is
+        // never installed.  The expression's value is the last
+        // statement's value, which is all we need.
         await station.Input.EvaluateAsync(
             "window.__rokid = []; ['mousedown','mouseup','click','pointerdown'].forEach(t => "
             + "window.addEventListener(t, (e) => window.__rokid.push({t: t, x: e.clientX, y: e.clientY, "
-            + "trusted: e.isTrusted}), true)); return 1;").ConfigureAwait(false);
+            + "trusted: e.isTrusted}), true)); 'installed'").ConfigureAwait(false);
 
         // A control: a click the page makes to itself.  If the recorder
         // catches THIS, the recorder is alive; if it is empty, the
@@ -197,9 +203,9 @@ internal static class Program
             .ConfigureAwait(false);
         await Task.Delay(200).ConfigureAwait(false);
         var control = await station.Input.EvaluateAsync(
-            "JSON.stringify(window.__rokid)").ConfigureAwait(false);
-        Console.WriteLine($"[{appName}] control (a self-made click): {control}");
-        var recorderAlive = control.Contains("\"x\":11");
+            "JSON.stringify(window.__rokid || [])").ConfigureAwait(false);
+        Console.WriteLine($"[{appName}] control (a self-made click): {control ?? "(no reply)"}");
+        var recorderAlive = control is not null && control.Contains("\"x\":11");
 
         Click();
         await Task.Delay(900).ConfigureAwait(false);
@@ -207,12 +213,19 @@ internal static class Program
         var eventsRaw = await station.Input.EvaluateAsync(
             "JSON.stringify(window.__rokid || [])").ConfigureAwait(false);
 
-        Console.WriteLine($"[{appName}] the application received: {eventsRaw}");
+        Console.WriteLine($"[{appName}] the application received: {eventsRaw ?? "(no reply)"}");
 
-        // The real click is the one that is NOT the control: the
-        // control was at (11, 22).
-        var got = eventsRaw.Contains("mousedown") && eventsRaw.Contains("\"t\":\"click\"")
-                  && !eventsRaw.Contains("\"x\":11");
+        // The real click is the TRUSTED one at the cursor's position.
+        // The control was a self-made event at (11, 22), so it is
+        // untrusted - and it must not be mistaken for the real thing.
+        //
+        // The check is therefore on the trusted click specifically, not
+        // on the whole array: the control stays in the array for the
+        // whole run, so looking for "no x:11 anywhere" would always
+        // fail.
+        var got = eventsRaw is not null
+                  && eventsRaw.Contains("\"t\":\"click\"")
+                  && eventsRaw.Contains("\"trusted\":true");
         Console.WriteLine();
         if (!recorderAlive)
         {
