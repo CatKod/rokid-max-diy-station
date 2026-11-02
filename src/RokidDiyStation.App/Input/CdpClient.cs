@@ -189,6 +189,13 @@ public sealed class CdpClient : IDisposable
         if (method == "Input.dispatchKeyEvent")
             OnKeyDispatched?.Invoke(message.ToJsonString());
 
+        // The same for the mouse.  A click that goes out but never
+        // arrives is just as invisible from the outside, and the two
+        // failure modes - not sent, and sent to the wrong place - look
+        // identical without a trace.
+        if (method == "Input.dispatchMouseEvent")
+            OnMouseDispatched?.Invoke(message.ToJsonString());
+
         var payload = Encoding.UTF8.GetBytes(message.ToJsonString());
 
         try
@@ -570,6 +577,17 @@ public sealed class CdpClient : IDisposable
     /// findable.
     /// </remarks>
     public event Action<string>? OnKeyDispatched;
+
+    /// <summary>
+    /// Raised for every mouse event that is dispatched.
+    /// </summary>
+    /// <remarks>
+    /// The same diagnostic purpose as <see cref="OnKeyDispatched"/>: a
+    /// click that never reaches the application looks exactly like a
+    /// click that was never sent, and only the trace tells the two
+    /// apart.
+    /// </remarks>
+    public event Action<string>? OnMouseDispatched;
 
     /// <summary>
     /// Send a character as a "char" event.

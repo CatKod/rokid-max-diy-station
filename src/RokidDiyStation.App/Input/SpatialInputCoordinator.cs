@@ -163,6 +163,21 @@ public sealed class SpatialInputCoordinator : IDisposable
     }
 
     /// <summary>
+    /// Raised for every mouse event that goes over the wire.
+    /// </summary>
+    /// <remarks>
+    /// The same diagnostic purpose as
+    /// <see cref="OnKeyDispatched"/>.  A click that never arrives looks
+    /// exactly like a click that was never sent, and only the trace
+    /// tells the two apart.
+    /// </remarks>
+    public event Action<string>? OnMouseDispatched
+    {
+        add => _router.OnMouseDispatched += value;
+        remove => _router.OnMouseDispatched -= value;
+    }
+
+    /// <summary>
     /// Evaluate an expression in the projected application.
     /// </summary>
     /// <remarks>

@@ -289,6 +289,20 @@ public sealed class BrowserInputRouter : IDisposable
         remove => _client.OnKeyDispatched -= value;
     }
 
+    /// <summary>
+    /// Raised for every mouse event that goes over the wire.
+    /// </summary>
+    /// <remarks>
+    /// The same diagnostic purpose as
+    /// <see cref="OnKeyDispatched"/>: a click that never reaches the
+    /// application looks exactly like a click that was never sent.
+    /// </remarks>
+    public event Action<string>? OnMouseDispatched
+    {
+        add => _client.OnMouseDispatched += value;
+        remove => _client.OnMouseDispatched -= value;
+    }
+
     /// <summary>Send a raw CDP command.</summary>
     public Task<string?> SendRawAsync(
         string method, System.Text.Json.Nodes.JsonObject? parameters = null,

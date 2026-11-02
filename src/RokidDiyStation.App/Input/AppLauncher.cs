@@ -110,7 +110,35 @@ public static class AppLauncher
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
         var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
 
-        var candidates = new List<DriveableApp>
+        // Squirrel-installed apps keep a different layout: a small
+        // launcher stub at the top, and the real executable in a
+        // versioned folder underneath ("app-4.51.180").  The stub is
+        // NOT a usable target - it does not pass the Chromium switches
+        // on to the process it starts, so --remote-debugging-port is
+        // silently dropped and the app never opens a DevTools endpoint.
+        // We verified this with Slack: the stub produced no endpoint,
+        // the versioned executable produced one.
+        //
+        // These are checked FIRST, and the plain paths below are only
+        // used as a fallback, so the versioned executable always wins
+        // over the stub for the same application.
+        var squirrelApps = new[]
+        {
+            (Root: Path.Combine(local, "slack"), Name: "Slack", Exe: "slack.exe"),
+            (Root: Path.Combine(local, "Discord"), Name: "Discord", Exe: "Discord.exe"),
+            (Root: Path.Combine(local, "Figma"), Name: "Figma", Exe: "Figma.exe"),
+            (Root: Path.Combine(local, "Programs", "Slack"), Name: "Slack", Exe: "slack.exe"),
+            (Root: Path.Combine(local, "Programs", "discord"), Name: "Discord", Exe: "Discord.exe"),
+        };
+
+        var candidates = new List<DriveableApp>();
+        foreach (var (root, name, exe) in squirrelApps)
+        {
+            var versioned = SquirrelExecutable.Find(root, Path.GetFileName(root), exe);
+            if (versioned is not null) candidates.Add(new DriveableApp(name, versioned));
+        }
+
+        candidates.AddRange(new[]
         {
             new DriveableApp("Visual Studio Code",
                 Path.Combine(local, "Programs", "Microsoft VS Code", "Code.exe")),
@@ -130,7 +158,7 @@ public static class AppLauncher
                 Path.Combine(roaming, "Telegram Desktop", "Telegram.exe")),
             new DriveableApp("Figma",
                 Path.Combine(local, "Figma", "Figma.exe")),
-        };
+        });
 
         // The 32-bit Program Files folder is where a lot of software
         // still lands, and where a machine without the 64-bit one puts
