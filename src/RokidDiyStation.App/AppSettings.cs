@@ -94,14 +94,23 @@ public sealed record AppSettings
     /// </summary>
     public double PanelFovFraction { get; init; } = 0.5;
 
-    /// <summary>Hotkey to set the anchor.  Format: "Space" / "F1" / "Ctrl+Space".</summary>
-    public string AnchorHotkey { get; init; } = "Space";
+    /// <summary>
+    /// The size of the virtual 3D cursor, as a scale factor.
+    /// </summary>
+    /// <remarks>
+    /// 1.0 is the default arrow.  The value is clamped to
+    /// [CursorSize.MinScale, CursorSize.MaxScale] when it is applied,
+    /// so a corrupt settings file cannot produce a zero-sized cursor.
+    /// </remarks>
+    public double CursorScale { get; init; } = Core.Spatial.CursorSize.DefaultScale;
 
+    /// <summary>Hotkey to set the anchor.  Format: "Space" / "F1" / "Ctrl+Space".</summary>
+    public string AnchorHotkey { get; init; } = "Ctrl+Shift+Win+Alt+Space";
     /// <summary>Hotkey to reset the anchor.</summary>
-    public string ResetHotkey { get; init; } = "R";
+    public string ResetHotkey { get; init; } = "Ctrl+Shift+Win+Alt+R";
 
     /// <summary>Hotkey to recenter the view (send a single neutral orientation).</summary>
-    public string RecenterHotkey { get; init; } = "C";
+    public string RecenterHotkey { get; init; } = "Ctrl+Shift+Win+Alt+C";
 
     /// <summary>Axis remap: device X / Y / Z -> world X / Y / Z.  Each value is
     /// 0/1/2 selecting which device axis to use.  Default = identity.</summary>

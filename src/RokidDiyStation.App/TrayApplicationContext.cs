@@ -75,6 +75,13 @@ public sealed class TrayApplicationContext
         // The station shares the tracker's anchor, so the panel and the
         // head pose live in the same world frame.
         _station = new SpatialStation(BuildAnchorOptions(settingsService.Current), tracking.Anchor);
+
+        // Apply the saved cursor size straight away, so the arrow is the
+        // right size from the very first frame rather than jumping to
+        // the user's chosen size when the settings window opens.
+        _station.ApplyCursorScale(
+            Core.Spatial.CursorSize.Clamp((float)settingsService.Current.CursorScale));
+
         _mainWindow = new MainWindow(_settingsService, _autostart, _tracking);
         // The host window is the WPF visual-tree parent for the TaskbarIcon.
         // It is created and never shown to the user (see NotifyIconHost).
@@ -292,36 +299,93 @@ public sealed class TrayApplicationContext
 
     private void RegisterHotkeys()
     {
-        // Use Ctrl+modifier so we don't steal Space/R/C from normal typing.
+        // Use a four-modifier combination so we don't steal Space/R/C
+        // from normal typing, and so the shortcuts cannot collide with
+        // another application's own hotkeys.
+        //
+        // WHY FOUR MODIFIERS, AND WHY NOT Fn
+        // ----------------------------------
+        // The user originally asked for Fn+<key>.  That is not
+        // possible on a laptop, and the reason is worth recording
+        // because it will come up again:
+        //
+        // The Fn key is not a key the operating system ever sees.  It
+        // is handled by the laptop's EMBEDDED CONTROLLER (EC), a
+        // microcontroller in the keyboard firmware.  On the ASUS TUF
+        // (the machine this was developed on) pressing Fn alone
+        // produces NO keyboard event at all - a low-level keyboard
+        // hook sees nothing, and there is no VK_FN virtual-key code
+        // for RegisterHotKey to use.  The EC only intercepts Fn+<key>
+        // COMBINATIONS and turns them into the laptop's own functions
+        // (brightness, volume, the numeric keypad, Airplane mode),
+        // and it does so in firmware, BEFORE Windows sees the
+        // keystroke.  Which combinations it intercepts is configured in
+        // the BIOS, not in our app.
+        //
+        // Ctrl+Shift+Win+Alt+<key> is the most-modified combination
+        // Windows offers that still produces a real key event, so it
+        // is what the app uses.
+        //
         // If registration fails (another app owns the hotkey) we log a
         // warning but the in-window buttons still work.
-        _spaceHotkey = TryHotkey(1, HotkeyNativeMethods.MOD_CTRL, 0x20 /* VK_SPACE */);
+        var all = HotkeyNativeMethods.MOD_CTRL
+                | HotkeyNativeMethods.MOD_SHIFT
+                | HotkeyNativeMethods.MOD_ALT
+                | HotkeyNativeMethods.MOD_WIN;
+
+        // "Pin panel here" is the action the user reaches for most, so
+        // it gets a list of candidates rather than a single one.
+        //
+        // Ctrl+Shift+Win+Alt+Space is the intended combination, but on
+        // some machines it is already owned - measured on the ASUS TUF
+        // this was developed on, it was taken, while the same
+        // combination with C, R, H and G was free.  So the action
+        // falls back through the alternates rather than silently
+        // losing the shortcut.
+        //
+        // The alternates are FUNCTION keys, deliberately: the letter
+        // combinations are spoken for by the other actions, and two
+        // actions cannot share one combination.
+        _spaceHotkey = TryHotkeyWithFallback(1, "pin panel here", new[]
+        {
+            (all, 0x20u, "Ctrl+Shift+Win+Alt+Space"),
+            (all, 0x70u, "Ctrl+Shift+Win+Alt+F1"),
+            (all, 0x71u, "Ctrl+Shift+Win+Alt+F2"),
+        });
         if (_spaceHotkey is not null)
             _spaceHotkey.Pressed += () => _tracking.SetAnchorHere();
         else
-            _mainWindow.AppendLog("Hotkey Ctrl+Space (pin panel here) unavailable — another app may own it.");
+            _mainWindow.AppendLog("No free hotkey found for \"pin panel here\" — use the tray menu.");
 
-        _rHotkey = TryHotkey(2, HotkeyNativeMethods.MOD_CTRL, 0x52 /* VK_R */);
+        _rHotkey = TryHotkeyWithFallback(2, "forget the panel", new[]
+        {
+            (all, 0x52u, "Ctrl+Shift+Win+Alt+R"),
+            (all, 0x72u, "Ctrl+Shift+Win+Alt+F3"),
+        });
         if (_rHotkey is not null)
             _rHotkey.Pressed += () => _tracking.ResetAnchor();
         else
-            _mainWindow.AppendLog("Hotkey Ctrl+R (forget the panel) unavailable.");
+            _mainWindow.AppendLog("No free hotkey found for \"forget the panel\" — use the tray menu.");
 
-        _cHotkey = TryHotkey(3, HotkeyNativeMethods.MOD_CTRL, 0x43 /* VK_C */);
+        _cHotkey = TryHotkeyWithFallback(3, "recenter", new[]
+        {
+            (all, 0x43u, "Ctrl+Shift+Win+Alt+C"),
+            (all, 0x73u, "Ctrl+Shift+Win+Alt+F4"),
+        });
         if (_cHotkey is not null)
             _cHotkey.Pressed += () => _mainWindow.Recenter();
         else
-            _mainWindow.AppendLog("Hotkey Ctrl+C (recenter) unavailable.");
+            _mainWindow.AppendLog("No free hotkey found for \"recenter\" — use the tray menu.");
 
-        // Show/hide window hotkey.  Ctrl+Alt+R is the intended combo,
-        // but other apps own it on some machines, so fall back to a
-        // list of alternates rather than silently losing the feature.
+        // Show/hide window hotkey.  The four-modifier combination is
+        // the intended combo, but other apps can own it on some
+        // machines, so fall back to a list of alternates rather than
+        // silently losing the feature.
         _showHotkey = TryHotkeyWithFallback(4, "show/hide window", new[]
         {
-            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x52u, "Ctrl+Alt+R"),
-            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x48u, "Ctrl+Alt+H"),
-            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x53u, "Ctrl+Alt+S"),
-            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x4Fu, "Ctrl+Alt+O"),
+            (all, 0x48u, "Ctrl+Shift+Win+Alt+H"),
+            (all, 0x74u, "Ctrl+Shift+Win+Alt+F5"),
+            (all, 0x53u, "Ctrl+Shift+Win+Alt+S"),
         });
         if (_showHotkey is not null)
             _showHotkey.Pressed += () => ToggleMainWindow();
@@ -336,9 +400,9 @@ public sealed class TrayApplicationContext
         // most often.
         _pinHotkey = TryHotkeyWithFallback(5, "bring the mouse back", new[]
         {
-            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x50u, "Ctrl+Alt+P"),
-            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT | HotkeyNativeMethods.MOD_SHIFT, 0x50u, "Ctrl+Alt+Shift+P"),
-            (HotkeyNativeMethods.MOD_CTRL | HotkeyNativeMethods.MOD_ALT, 0x47u, "Ctrl+Alt+G"),
+            (all, 0x50u, "Ctrl+Shift+Win+Alt+P"),
+            (all, 0x47u, "Ctrl+Shift+Win+Alt+G"),
+            (all | HotkeyNativeMethods.MOD_NOREPEAT, 0x75u, "Ctrl+Shift+Win+Alt+F6"),
         });
         if (_pinHotkey is not null)
             _pinHotkey.Pressed += () => SnapCursorHome();

@@ -1186,16 +1186,38 @@ public sealed class PanelRenderer : IDisposable
     }
 
     /// <summary>
+    /// The cursor's size scale factor, as set by the user.
+    /// </summary>
+    /// <remarks>
+    /// 1.0 is the default arrow.  The value is clamped on the way in,
+    /// so a corrupt or hand-edited settings file cannot produce a
+    /// zero-sized cursor.
+    ///
+    /// This is a plain field rather than a property with a setter that
+    /// does work, because it is read on the render thread every frame
+    /// and the clamp is the only thing that has to happen.
+    /// </remarks>
+    private float _cursorScale = CursorSize.DefaultScale;
+
+    /// <summary>
     /// The cursor's world size, in metres.
     /// </summary>
     /// <remarks>
     /// A standard Windows arrow subtends roughly 1 degree of visual
     /// angle at reading distance.  At the panel's default distance of
-    /// 2 m, 1 degree is about 35 mm; we use a slightly smaller quad
-    /// so the cursor does not dominate the content it is pointing at.
+    /// 2 m, 1 degree is about 35 mm; the default is a slightly
+    /// smaller quad so the cursor does not dominate the content it is
+    /// pointing at.
+    ///
+    /// The user can scale this from the settings window, because how
+    /// big the arrow should be is a matter of taste and of what they
+    /// are reading.
     /// </remarks>
-    private const float CursorWidthMetres = 0.020f;
-    private const float CursorHeightMetres = 0.026f;
+    public float CursorScale
+    {
+        get => _cursorScale;
+        set => _cursorScale = Core.Spatial.CursorSize.Clamp(value);
+    }
 
     /// <summary>
     /// How far the cursor floats off the panel's surface, in metres.
@@ -1237,8 +1259,13 @@ public sealed class PanelRenderer : IDisposable
         var viewerRight = -pose.Right;
         var up = Vector3.Normalize(pose.Up);
 
-        var hx = viewerRight * (CursorWidthMetres * 0.5f);
-        var hy = up * (CursorHeightMetres * 0.5f);
+        // The cursor's size comes from the user's setting, so it can be
+        // changed while the app is running.  The scale is uniform, so
+        // the arrow keeps its aspect ratio and is never stretched.
+        var (cursorWidth, cursorHeight) = Core.Spatial.CursorSize.SizeMetres(_cursorScale);
+
+        var hx = viewerRight * (cursorWidth * 0.5f);
+        var hy = up * (cursorHeight * 0.5f);
 
         // The arrow's HOT POINT is its tip, which in the texture is at
         // the top-left - i.e. at texture coordinates (0, 0) of the

@@ -500,6 +500,17 @@ public sealed class SpatialStation : IDisposable
     public void ApplyAnchorOptions(Core.Spatial.SpatialAnchorOptions options)
         => _anchor.ApplyOptions(options);
 
+    /// <summary>
+    /// Set the size of the virtual 3D cursor.
+    /// </summary>
+    /// <remarks>
+    /// Applied live: the user can see the arrow grow or shrink while
+    /// the app is running, which is the only practical way to choose a
+    /// size that looks right on their own face.
+    /// </remarks>
+    /// <param name="scale">The scale factor; clamped into range.</param>
+    public void ApplyCursorScale(float scale) => _renderer.CursorScale = scale;
+
     /// <summary>Make the current gaze the neutral forward direction.</summary>
     public void Recenter() => _anchor.Recenter();
 

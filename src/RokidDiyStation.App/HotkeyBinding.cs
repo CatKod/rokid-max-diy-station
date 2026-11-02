@@ -114,4 +114,15 @@ internal static class HotkeyNativeMethods
     public const uint MOD_CTRL  = 0x0002;
     public const uint MOD_SHIFT = 0x0004;
     public const uint MOD_WIN   = 0x0008;
+
+    /// <summary>
+    /// Deliver the hotkey only once per physical press.
+    /// </summary>
+    /// <remarks>
+    /// Without this, holding the combination down repeats the action
+    /// as fast as the keyboard's auto-repeat can fire it - which for
+    /// "bring the mouse back" means the cursor is yanked to the
+    /// primary display over and over.
+    /// </remarks>
+    public const uint MOD_NOREPEAT = 0x4000;
 }

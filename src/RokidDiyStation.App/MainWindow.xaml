@@ -59,6 +59,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <!--
                     The source of the panel's content.
@@ -123,6 +124,28 @@
                     -->
                     <Slider x:Name="ComfortConeSlider" Minimum="0" Maximum="30" TickFrequency="1" IsSnapToTickEnabled="True" Width="200"/>
                     <TextBlock x:Name="ComfortConeValueLabel" VerticalAlignment="Center" MinWidth="80" Margin="8,0,0,0"/>
+                </StackPanel>
+
+                <!--
+                    The cursor's size.
+
+                    This is applied LIVE, not only when "Save
+                    settings" is pressed: the only practical way to
+                    choose an arrow size is to see it.  The user moves
+                    the slider and the arrow in the glasses grows or
+                    shrinks immediately.
+
+                    The range is set in code from CursorSize's limits,
+                    so the slider can never offer a size that the
+                    renderer would reject.
+                -->
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Cursor size" VerticalAlignment="Center" Margin="0,8,0,0"
+                           ToolTip="How big the 3D mouse arrow is drawn in the glasses. Some people want a small precise pointer, others a big obvious one."/>
+                <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="8,8,0,0">
+                    <Slider x:Name="CursorScaleSlider"
+                            Minimum="0.25" Maximum="4" TickFrequency="0.25" IsSnapToTickEnabled="True" Width="200"
+                            ValueChanged="OnCursorScaleChanged"/>
+                    <TextBlock x:Name="CursorScaleLabel" VerticalAlignment="Center" MinWidth="80" Margin="8,0,0,0"/>
                 </StackPanel>
             </Grid>
         </GroupBox>
@@ -197,16 +220,20 @@
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
                 <Grid.RowDefinitions>
-                    <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
+                    <RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/>
                 </Grid.RowDefinitions>
                 <TextBlock Grid.Row="0" Grid.Column="0" Text="Set anchor here" VerticalAlignment="Center"/>
-                <TextBlock Grid.Row="0" Grid.Column="1" Text="Ctrl+Space" Foreground="#FF64B5F6"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" Text="Ctrl+Shift+Win+Alt+Space" Foreground="#FF64B5F6"/>
                 <TextBlock Grid.Row="1" Grid.Column="0" Text="Reset anchor" VerticalAlignment="Center"/>
-                <TextBlock Grid.Row="1" Grid.Column="1" Text="Ctrl+R" Foreground="#FF64B5F6"/>
+                <TextBlock Grid.Row="1" Grid.Column="1" Text="Ctrl+Shift+Win+Alt+R" Foreground="#FF64B5F6"/>
                 <TextBlock Grid.Row="2" Grid.Column="0" Text="Recenter view" VerticalAlignment="Center"/>
-                <TextBlock Grid.Row="2" Grid.Column="1" Text="Ctrl+C" Foreground="#FF64B5F6"/>
+                <TextBlock Grid.Row="2" Grid.Column="1" Text="Ctrl+Shift+Win+Alt+C" Foreground="#FF64B5F6"/>
                 <TextBlock Grid.Row="3" Grid.Column="0" Text="Show/hide this window" VerticalAlignment="Center" Margin="0,4,0,0"/>
-                <TextBlock Grid.Row="3" Grid.Column="1" Text="Ctrl+Alt+R" Foreground="#FF64B5F6" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="3" Grid.Column="1" Text="Ctrl+Shift+Win+Alt+H" Foreground="#FF64B5F6" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Bring the mouse back" VerticalAlignment="Center" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="4" Grid.Column="1" Text="Ctrl+Shift+Win+Alt+G" Foreground="#FF64B5F6" Margin="0,4,0,0"/>
+                <TextBlock Grid.Row="5" Grid.Column="0" Text="" VerticalAlignment="Center" Margin="0,6,0,0"/>
+                <TextBlock Grid.Row="5" Grid.Column="1" Text="If a combination is already taken by another app, an alternate is used and the log says which one." Foreground="#FF9E9E9E" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
             </Grid>
         </GroupBox>
 

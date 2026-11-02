@@ -127,6 +127,12 @@ public partial class MainWindow : Window
         PanelDistanceSlider.Value = s.PanelDistanceMetres;
         NeckScaleSlider.Value = s.NeckModelScale;
 
+        // The cursor size slider's range comes from the core, so the
+        // slider can never offer a value the renderer would reject.
+        CursorScaleSlider.Minimum = Core.Spatial.CursorSize.MinScale;
+        CursorScaleSlider.Maximum = Core.Spatial.CursorSize.MaxScale;
+        CursorScaleSlider.Value = Core.Spatial.CursorSize.Clamp((float)s.CursorScale);
+
         // Set the radio button BEFORE wiring up the handler, or the
         // Checked event fires with the other button's state still
         // showing and the cone row is enabled or hidden wrongly.
@@ -169,6 +175,7 @@ public partial class MainWindow : Window
         NeckScaleLabel.Text = NeckScaleSlider.Value <= 0.01
             ? "none"
             : $"{NeckScaleSlider.Value * 100:0}%";
+        CursorScaleLabel.Text = $"{CursorScaleSlider.Value:0.00}×";
 
         // The comfort cone only means anything in comfort-cone mode, so
         // the whole row is hidden in strict world-lock mode.  Hiding it
@@ -195,6 +202,37 @@ public partial class MainWindow : Window
         AppendLog(ComfortConeRadio.IsChecked == true
             ? "Anchoring: comfort cone — the panel will be dragged back towards your gaze when you look away."
             : "Anchoring: strict world-lock — the panel now stays exactly where you put it.");
+    }
+
+    /// <summary>
+    /// The user changed the cursor's size.
+    /// </summary>
+    /// <remarks>
+    /// Applied LIVE, like the anchoring mode.  The only practical way
+    /// to pick an arrow size is to see it: the slider moves and the
+    /// arrow in the glasses grows or shrinks immediately.
+    ///
+    /// The value is persisted by "Save settings", which is the same
+    /// button that persists everything else.
+    /// </remarks>
+    private void OnCursorScaleChanged(object sender, RoutedEventArgs e)
+    {
+        // This handler is wired in XAML, so it fires during XAML
+        // parsing too: setting the slider's Minimum coerces its Value,
+        // which raises ValueChanged, and at that moment the label and
+        // the station do not exist yet.  Every access therefore has to
+        // be guarded, or the app dies with a NullReferenceException
+        // before it ever shows a window.
+        if (CursorScaleSlider is null) return;
+
+        var scale = Core.Spatial.CursorSize.Clamp((float)CursorScaleSlider.Value);
+
+        // The label may not exist yet (during XAML parsing).
+        if (CursorScaleLabel is not null)
+            CursorScaleLabel.Text = $"{scale:0.00}×";
+
+        // The station may not be attached yet.
+        _station?.ApplyCursorScale(scale);
     }
 
     public void UpdateStatus(TrackingStatus s)
@@ -347,6 +385,7 @@ public partial class MainWindow : Window
             ComfortConeDegrees = ComfortConeSlider.Value,
             PanelDistanceMetres = PanelDistanceSlider.Value,
             NeckModelScale = NeckScaleSlider.Value,
+            CursorScale = CursorScaleSlider.Value,
         };
         _settingsService.Update(next);
         // Apply the spatial options live, so the user sees the effect
