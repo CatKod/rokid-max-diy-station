@@ -93,23 +93,56 @@ public class VirtualDisplayLifecycleTests
         // That is why the pipe is not used: it is not merely a one-way
         // door, it BREAKS THE DRIVER.
         //
-        // This test guards against the pipe creeping back in.
-        var sources = System.IO.Directory.GetFiles(
-            AppContext.BaseDirectory, "*.cs", System.IO.SearchOption.AllDirectories);
+        // This test guards against the pipe creeping back in.  It
+        // checks the ASSEMBLY, not the source tree, so it still means
+        // something when the tests are run against a published build.
+        var assembly = typeof(RokidDiyStation.App.Program).Assembly;
 
-        // The source is not shipped with the binary, so this can only
-        // be checked when the tests are run from a source tree.
-        var controller = sources.FirstOrDefault(s =>
-            s.EndsWith("VirtualDisplayController.cs", StringComparison.OrdinalIgnoreCase));
+        var offenders = assembly.GetTypes()
+            .Where(t => t.FullName!.Contains("VirtualDisplayDriverPipe", StringComparison.Ordinal)
+                     || t.FullName!.Contains("DriverPipe", StringComparison.Ordinal))
+            .Select(t => t.FullName!)
+            .ToList();
 
-        if (controller is null)
+        Assert.True(offenders.Count == 0,
+            "the driver's SETDISPLAYCOUNT pipe breaks the driver (error 43) and must not "
+            + "come back: " + string.Join(", ", offenders));
+
+        // And the command must not appear in the built assembly's
+        // metadata at all - not even as a leftover constant.
+        Assert.False(ContainsStringLiteral(assembly, "SETDISPLAYCOUNT"),
+            "the string SETDISPLAYCOUNT must not appear in the built assembly.");
+    }
+
+    /// <summary>
+    /// Whether the assembly's metadata contains the given string.
+    /// </summary>
+    /// <remarks>
+    /// The check is deliberately blunt - it looks for the string in the
+    /// assembly's raw bytes.  A false positive is harmless (it would
+    /// only mean the string is mentioned in a comment-like constant),
+    /// and a false negative would mean the pipe came back.
+    /// </remarks>
+    private static bool ContainsStringLiteral(System.Reflection.Assembly assembly, string text)
+    {
+        var path = assembly.Location;
+        if (!System.IO.File.Exists(path)) return false;
+
+        var bytes = System.IO.File.ReadAllBytes(path);
+        var needle = System.Text.Encoding.Unicode.GetBytes(text);
+
+        for (var i = 0; i + needle.Length <= bytes.Length; i++)
         {
-            // No source tree - the check is not applicable.
-            return;
+            var found = true;
+            for (var j = 0; j < needle.Length; j++)
+            {
+                if (bytes[i + j] == needle[j]) continue;
+                found = false;
+                break;
+            }
+            if (found) return true;
         }
 
-        var text = System.IO.File.ReadAllText(controller);
-        Assert.DoesNotContain("SETDISPLAYCOUNT", text, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("MTTVirtualDisplayPipe", text, StringComparison.OrdinalIgnoreCase);
+        return false;
     }
 }
