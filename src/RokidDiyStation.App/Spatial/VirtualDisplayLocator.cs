@@ -1,0 +1,381 @@
+// SPDX-License-Identifier: MIT
+//
+// Finding the virtual display, and driving it.
+//
+// The spatial display is an IddCx virtual monitor that lives OUTSIDE
+// the visible physical desktop, at negative coordinates - typically
+// (-1920, 0), just to the left of the primary display.  Two things
+// follow from that, and both are handled here:
+//
+//   1. It is found by its POSITION, not by its device name.  The
+//      "\\.\DISPLAYn" index is assigned by enumeration order and
+//      changes between reboots and whenever a monitor is hot-plugged,
+//      so it is worthless as an identity.  The rectangle is stable.
+//
+//   2. It is POSITIONED with ChangeDisplaySettingsEx, not by asking the
+//      user to drag it around in the Windows settings app.
+//
+// Why negative coordinates are deliberate
+// ---------------------------------------
+// Windows forbids overlapping monitor rectangles: the CCD rules require
+// active displays to be disjoint or adjacent, and ChangeDisplaySettingsEx
+// returns DISP_CHANGE_BADPARAM otherwise.  So the virtual monitor cannot
+// share the Rokid Max's coordinates at (3840, 0).  That is fortunate,
+// because if it could, our own WS_EX_TOPMOST opaque AR panel would sit
+// on top of it and occlude the capture - a hall-of-mirrors feedback loop.
+//
+// Windows has no concept of an "off-screen" monitor.  A monitor at
+// (-1920, 0) is part of the virtual desktop, the mouse reaches it, and
+// the OS delivers clicks, focus and z-order there exactly as it would
+// anywhere else.  The user simply sees that rectangle in the glasses
+// instead of on the physical screen.
+using System.Runtime.InteropServices;
+
+namespace RokidDiyStation.App.Spatial;
+
+/// <summary>
+/// A monitor in the virtual desktop, with everything the cursor mapping
+/// and the WGC capture need.
+/// </summary>
+/// <param name="Handle">The HMONITOR.</param>
+/// <param name="DeviceName">The Win32 device name, e.g. "\\.\DISPLAY14".</param>
+/// <param name="DeviceId">The EDID-derived device ID, e.g. "MONITOR\MTT1337\...".</param>
+/// <param name="Description">The monitor's human-readable name.</param>
+/// <param name="Bounds">The monitor's rectangle in virtual-desktop pixels.</param>
+/// <param name="Width">The monitor's width in pixels.</param>
+/// <param name="Height">The monitor's height in pixels.</param>
+/// <param name="IsVirtual">Whether this is the IddCx virtual display.</param>
+public sealed record MonitorInfo(
+    IntPtr Handle,
+    string DeviceName,
+    string DeviceId,
+    string Description,
+    System.Drawing.Rectangle Bounds,
+    int Width,
+    int Height,
+    bool IsVirtual)
+{
+    /// <summary>
+    /// Map a point in virtual-desktop pixels onto this monitor's UV
+    /// space.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole cursor-feedback mapping, and it is exact: the
+    /// process is PerMonitorV2 DPI aware (see app.manifest), so
+    /// GetCursorPos and GetMonitorInfo share one coordinate space, and
+    /// the monitor's pixel rectangle IS the capture texture's size.
+    /// </remarks>
+    /// <returns>
+    /// True when the point lies inside the monitor's rectangle.
+    /// </returns>
+    public bool TryToUv(int x, int y, out float u, out float v)
+    {
+        u = 0f;
+        v = 0f;
+        if (Width <= 0 || Height <= 0) return false;
+
+        if (x < Bounds.Left || x >= Bounds.Right) return false;
+        if (y < Bounds.Top || y >= Bounds.Bottom) return false;
+
+        u = (x - Bounds.Left) / (float)Width;
+        v = (y - Bounds.Top) / (float)Height;
+        return true;
+    }
+}
+
+/// <summary>
+/// Finds the virtual display and positions it.
+/// </summary>
+public static class VirtualDisplayLocator
+{
+    /// <summary>
+    /// The virtual desktop's left edge.
+    /// </summary>
+    /// <remarks>
+    /// The virtual monitor is placed immediately to the LEFT of the
+    /// primary display, so this is -1920 on a 1920-wide primary.
+    /// </remarks>
+    public const int DefaultOffsetX = -1920;
+
+    /// <summary>
+    /// The virtual display's pixel width.  It matches the Rokid Max's
+    /// per-eye viewport exactly, so the cursor mapping and the captured
+    /// texture line up one-to-one with no letterboxing.
+    /// </summary>
+    public const int DefaultWidth = 1920;
+
+    /// <summary>
+    /// The virtual display's pixel height.
+    /// </summary>
+    public const int DefaultHeight = 1080;
+
+    // -----------------------------------------------------------------
+    // Win32
+    // -----------------------------------------------------------------
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT
+    {
+        public int Left, Top, Right, Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MONITORINFOEX
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string szDevice;
+    }
+
+    private delegate bool MonitorEnumProc(IntPtr h, IntPtr dc, ref RECT r, IntPtr data);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumDisplayMonitors(
+        IntPtr hdc, IntPtr clip, MonitorEnumProc fn, IntPtr data);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool GetMonitorInfo(IntPtr h, ref MONITORINFOEX mi);
+
+    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+    private static extern bool EnumDisplayDevices(
+        string? device, uint devNum, ref DisplayNative.DISPLAY_DEVICE display, uint flags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+    private static extern bool EnumDisplaySettings(
+        string? deviceName, int mode, ref DisplayNative.DEVMODE dm);
+
+    [DllImport("user32.dll", CharSet = CharSet.Ansi)]
+    private static extern int ChangeDisplaySettingsEx(
+        string? deviceName, ref DisplayNative.DEVMODE dm, IntPtr hwnd, uint flags, IntPtr param);
+
+    private const uint CDS_UPDATEREGISTRY = 0x00000001;
+    private const uint CDS_TEST = 0x00000002;
+
+    private const int DM_POSITION = 0x00000020;
+    private const int DM_BITSPERPEL = 0x00040000;
+    private const int DM_PELSWIDTH = 0x00080000;
+    private const int DM_PELSHEIGHT = 0x00100000;
+    private const int DM_DISPLAYFREQUENCY = 0x00400000;
+
+    /// <summary>
+    /// The adapter device name of the virtual display, e.g.
+    /// "\\.\DISPLAY14".
+    /// </summary>
+    /// <remarks>
+    /// Found by asking each attached adapter for its monitors and
+    /// looking for the IddCx one.  The virtual monitor's EDID is the
+    /// driver's own ("MTT1337"), which is how it is told apart from the
+    /// Rokid Max ("LBT4753").
+    /// </remarks>
+    public static string? FindVirtualAdapter()
+    {
+        var dd = new DisplayNative.DISPLAY_DEVICE
+        {
+            cb = Marshal.SizeOf<DisplayNative.DISPLAY_DEVICE>()
+        };
+
+        for (uint i = 0; EnumDisplayDevices(null, i, ref dd, 0); i++)
+        {
+            if ((dd.StateFlags & 0x1) == 0) continue;
+
+            var adapterName = dd.DeviceName;
+            var isVirtualAdapter = dd.DeviceString.Contains(
+                "Virtual", System.StringComparison.OrdinalIgnoreCase);
+
+            var mon = new DisplayNative.DISPLAY_DEVICE
+            {
+                cb = Marshal.SizeOf<DisplayNative.DISPLAY_DEVICE>()
+            };
+            for (uint j = 0; EnumDisplayDevices(adapterName, j, ref mon, 0); j++)
+            {
+                if ((mon.StateFlags & 0x1) == 0) continue;
+                if (IsVirtualMonitorId(mon.DeviceID) || isVirtualAdapter)
+                    return adapterName;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Whether a monitor's device ID belongs to the IddCx virtual
+    /// display.
+    /// </summary>
+    /// <remarks>
+    /// The driver publishes a hardcoded EDID whose manufacturer and
+    /// product id are "MTT1337".  That is stable across reboots and
+    /// re-enumeration, unlike the "\\.\DISPLAYn" index.
+    /// </remarks>
+    public static bool IsVirtualMonitorId(string? deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId)) return false;
+        return deviceId.Contains("MTT1337", System.StringComparison.OrdinalIgnoreCase)
+            || deviceId.Contains("MttVDD", System.StringComparison.OrdinalIgnoreCase)
+            || deviceId.StartsWith("ROOT\\DISPLAY", System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Enumerate every monitor in the virtual desktop.
+    /// </summary>
+    public static IReadOnlyList<MonitorInfo> Enumerate()
+    {
+        var results = new System.Collections.Generic.List<MonitorInfo>();
+        var collector = new Collector();
+        EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, collector.Callback, IntPtr.Zero);
+        results.AddRange(collector.Monitors);
+        return results;
+    }
+
+    /// <summary>
+    /// Find the virtual display.
+    /// </summary>
+    /// <remarks>
+    /// Preferred criterion is the EDID (stable), with the rectangle as
+    /// the fallback: the virtual monitor is the one that lives outside
+    /// the visible desktop, at negative coordinates.
+    /// </remarks>
+    public static MonitorInfo? FindVirtual()
+    {
+        var all = Enumerate();
+        if (all.Count == 0) return null;
+
+        var byId = all.FirstOrDefault(m => m.IsVirtual);
+        if (byId is not null) return byId;
+
+        // Fall back to position: the spatial display is deliberately
+        // placed at negative coordinates.
+        return all.FirstOrDefault(m => m.Bounds.Left < 0);
+    }
+
+    /// <summary>
+    /// Move the virtual display to a resolution and an absolute position.
+    /// </summary>
+    /// <remarks>
+    /// This is how the spatial display is opened and closed.  Setting the
+    /// size to zero detaches the monitor from the desktop, and restoring
+    /// it reattaches - neither needs administrator rights, which is what
+    /// makes "Open spatial display" a plain user action.
+    /// </remarks>
+    /// <param name="adapterDeviceName">
+    /// The adapter's device name, e.g. "\\.\DISPLAY14".  When null, the
+    /// virtual display is looked up.
+    /// </param>
+    /// <param name="width">The width in pixels, or 0 to detach.</param>
+    /// <param name="height">The height in pixels, or 0 to detach.</param>
+    /// <param name="x">The left edge in virtual-desktop pixels.</param>
+    /// <param name="y">The top edge in virtual-desktop pixels.</param>
+    /// <returns>True when Windows accepted the change.</returns>
+    public static bool Position(
+        string? adapterDeviceName, int width, int height, int x, int y)
+    {
+        var adapter = adapterDeviceName ?? FindVirtualAdapter();
+        if (adapter is null) return false;
+
+        var dm = new DisplayNative.DEVMODE
+        {
+            dmSize = (short)Marshal.SizeOf<DisplayNative.DEVMODE>()
+        };
+        if (!EnumDisplaySettings(adapter, -1, ref dm)) return false;
+
+        dm.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL
+                    | DM_DISPLAYFREQUENCY | DM_POSITION;
+
+        if (width <= 0 || height <= 0)
+        {
+            // Detach: zero dimensions take the monitor off the desktop.
+            dm.dmPelsWidth = 0;
+            dm.dmPelsHeight = 0;
+            dm.dmDisplayFrequency = 0;
+            dm.dmPositionX = 0;
+            dm.dmPositionY = 0;
+        }
+        else
+        {
+            dm.dmPelsWidth = width;
+            dm.dmPelsHeight = height;
+            dm.dmBitsPerPel = 32;
+            dm.dmDisplayFrequency = 60;
+            dm.dmPositionX = x;
+            dm.dmPositionY = y;
+        }
+
+        // Ask Windows whether the mode is acceptable before applying it,
+        // so a rejected mode does not tear the desktop down.
+        var test = dm;
+        if (ChangeDisplaySettingsEx(adapter, ref test, IntPtr.Zero, CDS_TEST, IntPtr.Zero) != 0)
+            return false;
+
+        return ChangeDisplaySettingsEx(adapter, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero) == 0;
+    }
+
+    /// <summary>
+    /// Place the virtual display where the spatial panel expects it.
+    /// </summary>
+    public static bool AttachDefault()
+        => Position(null, DefaultWidth, DefaultHeight, DefaultOffsetX, 0);
+
+    /// <summary>
+    /// Take the virtual display off the desktop.
+    /// </summary>
+    public static bool Detach()
+        => Position(null, 0, 0, 0, 0);
+
+    private sealed class Collector
+    {
+        public readonly List<MonitorInfo> Monitors = new();
+
+        public bool Callback(IntPtr h, IntPtr dc, ref RECT r, IntPtr data)
+        {
+            var mi = new MONITORINFOEX { cbSize = Marshal.SizeOf<MONITORINFOEX>() };
+            if (!GetMonitorInfo(h, ref mi)) return true;
+
+            var bounds = new System.Drawing.Rectangle(
+                mi.rcMonitor.Left, mi.rcMonitor.Top,
+                mi.rcMonitor.Right - mi.rcMonitor.Left,
+                mi.rcMonitor.Bottom - mi.rcMonitor.Top);
+
+            var (deviceId, description) = ResolveIdentity(mi.szDevice);
+
+            Monitors.Add(new MonitorInfo(
+                h,
+                mi.szDevice,
+                deviceId,
+                description,
+                bounds,
+                bounds.Width,
+                bounds.Height,
+                IsVirtualMonitorId(deviceId)));
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Resolve a monitor's EDID-derived device ID and its name.
+    /// </summary>
+    /// <remarks>
+    /// The HMONITOR's szDevice is "\\.\DISPLAYn\Monitor0", which is the
+    /// MONITOR's path under the ADAPTER's path.  EnumDisplayDevices
+    /// wants the adapter's path, so we trim the "\Monitor0" suffix.
+    /// </remarks>
+    private static (string DeviceId, string Description) ResolveIdentity(string monitorDeviceName)
+    {
+        var adapterPath = monitorDeviceName;
+        var idx = monitorDeviceName.LastIndexOf("\\Monitor", System.StringComparison.OrdinalIgnoreCase);
+        if (idx > 0) adapterPath = monitorDeviceName[..idx];
+
+        var mon = new DisplayNative.DISPLAY_DEVICE
+        {
+            cb = Marshal.SizeOf<DisplayNative.DISPLAY_DEVICE>()
+        };
+        for (uint j = 0; EnumDisplayDevices(adapterPath, j, ref mon, 0); j++)
+        {
+            if ((mon.StateFlags & 0x1) == 0) continue;
+            return (mon.DeviceID ?? "", mon.DeviceString ?? "");
+        }
+
+        return ("", "");
+    }
+}
