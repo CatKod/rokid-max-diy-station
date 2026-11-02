@@ -362,6 +362,10 @@ Issues, IMU captures, protocol dumps and PRs are all welcome — especially
 anything you learn while sniffing Rokid Max USB traffic, and reports from
 machines other than the reference one.
 
+- **Report a bug:** [GitHub issues](https://github.com/CatKod/rokid-max-diy-station/issues)
+- **Download:** [latest release](https://github.com/CatKod/rokid-max-diy-station/releases/latest)
+- **Reddit announcement:** [r/rokid post draft](docs/community/reddit-post.md)
+
 If you are new to the codebase, the
 [milestone documents](docs/) are the best guide: each one explains not
 just *what* was built but *why the previous approach failed*, which is the
