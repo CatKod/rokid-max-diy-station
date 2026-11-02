@@ -87,6 +87,17 @@ public sealed class SpatialStation : IDisposable
     private string _message = "Idle";
     private string? _preferredDisplayPath;
 
+    /// <summary>
+    /// The soft barrier that keeps the cursor off the glasses' display.
+    /// </summary>
+    /// <remarks>
+    /// It is created once and installed/uninstalled as the spatial
+    /// display opens and closes.  The hook is GLOBAL - it sees every
+    /// mouse move in the system - so it must not be left installed
+    /// while the spatial display is closed.
+    /// </remarks>
+    private readonly MouseBarrier _mouseBarrier = new();
+
     /// <summary>Raised when the station's state changes.</summary>
     public event Action<SpatialState, string>? OnStatus;
 
@@ -289,13 +300,19 @@ public sealed class SpatialStation : IDisposable
     /// (DISP_CHANGE_BADPARAM), and our own WS_EX_TOPMOST opaque AR
     /// panel would occlude the capture.
     ///
-    /// This needs no administrator rights: attaching and detaching are
-    /// both plain ChangeDisplaySettingsEx calls.
+    /// This needs no administrator rights: the attach and the detach
+    /// are both plain display-configuration calls.
     /// </remarks>
     /// <returns>True when the display is attached afterwards.</returns>
     public bool OpenSpatialDisplay()
     {
-        if (!VirtualDisplayLocator.AttachDefault())
+        // The CCD attach is the whole mechanism - the adapter is
+        // always attached to the machine, so there is nothing to
+        // "publish" first.
+        //
+        // The legacy attach below is the fallback for the case where
+        // the CCD API cannot read this machine's topology.
+        if (!VirtualDisplayController.Open() && !VirtualDisplayLocator.AttachDefault())
         {
             Log("The virtual display could not be attached. "
                 + "Is the Virtual Display Driver installed?");
@@ -317,17 +334,116 @@ public sealed class SpatialStation : IDisposable
 
         Log($"Spatial display open: {monitor.DeviceName} {monitor.Width}x{monitor.Height} "
             + $"at ({monitor.Bounds.Left},{monitor.Bounds.Top}).");
+
+        // The glasses' own display is a projection canvas, not a work
+        // surface - the user sees the virtual display in the glasses,
+        // not the glasses' screen.  So the cursor is kept off it.
+        InstallMouseBarrier();
+
         return true;
     }
 
     /// <summary>
     /// Take the virtual display off the desktop.
     /// </summary>
+    /// <remarks>
+    /// The virtual display is fully REMOVED from the desktop, not
+    /// merely detached: the rectangle does not appear in Display
+    /// Settings, there is nothing to accidentally drag a window onto,
+    /// and nothing can get lost behind the glasses.
+    ///
+    /// This is the behaviour the user asked for - "when I am not using
+    /// the spatial display, disable it" - because a leftover virtual
+    /// monitor is a trap: a window dragged onto it goes behind the
+    /// glasses and is very hard to get back.
+    ///
+    /// It is also REVERSIBLE: the adapter stays attached to the
+    /// machine, so opening it again brings it straight back.
+    /// </remarks>
     public bool CloseSpatialDisplay()
     {
-        var ok = VirtualDisplayLocator.Detach();
+        // The barrier goes first, so the cursor is free while the
+        // display is being torn down.
+        UninstallMouseBarrier();
+
+        var ok = VirtualDisplayController.Close();
+        if (!ok)
+        {
+            // Fall back to the plain detach, which at least takes the
+            // monitor off the desktop.
+            ok = VirtualDisplayLocator.Detach();
+        }
+
         Log(ok ? "Spatial display closed." : "The virtual display could not be detached.");
         return ok;
+    }
+
+    // -----------------------------------------------------------------
+    // The mouse barrier
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Keep the cursor out of the glasses' display rectangle.
+    /// </summary>
+    /// <remarks>
+    /// The glasses' display is identified by the same fingerprint the
+    /// renderer uses, so the barrier and the panel always agree on
+    /// which screen is the Rokid Max.
+    ///
+    /// The barrier is SOFT (see <see cref="MouseBarrier"/>): the
+    /// cursor is pushed back but not hard-clipped, because ClipCursor
+    /// breaks the XP-Pen Artist's absolute digitiser.
+    /// </remarks>
+    private void InstallMouseBarrier()
+    {
+        var glasses = DisplayLocator.Select(_preferredDisplayPath);
+        if (glasses is null)
+        {
+            Log("The mouse barrier was not installed: the glasses' display was not found.");
+            return;
+        }
+
+        // The barrier is only meaningful when the glasses' display is
+        // NOT where the virtual display is.  When they overlap, the
+        // user IS working on that screen and blocking it would be
+        // wrong.
+        var spatial = FindVirtualDisplay();
+        if (spatial is not null && spatial.Bounds.IntersectsWith(glasses.Bounds))
+        {
+            Log("The mouse barrier was not installed: the glasses' display overlaps the spatial display.");
+            return;
+        }
+
+        var bounds = glasses.Bounds;
+        var forbidden = new NativeMethods.RECT
+        {
+            left = bounds.Left,
+            top = bounds.Top,
+            right = bounds.Right,
+            bottom = bounds.Bottom,
+        };
+
+        // The glasses are to the RIGHT of the working displays in the
+        // usual layout (the laptop at 0, the tablet at 1920, the
+        // glasses at 3840), so the cursor is pushed back to the left
+        // edge.  When the glasses are on the other side, it is pushed
+        // to the right.
+        var forbiddenIsToTheRight = glasses.Bounds.Left >= 0;
+
+        if (_mouseBarrier.Install(forbidden, forbiddenIsToTheRight))
+            Log($"The cursor is kept off the Rokid Max's display ({bounds.X},{bounds.Y}).");
+        else
+            Log("The mouse barrier could not be installed.");
+    }
+
+    /// <summary>Let the cursor go everywhere again.</summary>
+    private void UninstallMouseBarrier()
+    {
+        if (_mouseBarrier.IsActive)
+        {
+            _mouseBarrier.Uninstall();
+            Log("The cursor can go back to the Rokid Max's display.");
+        }
     }
 
     /// <summary>

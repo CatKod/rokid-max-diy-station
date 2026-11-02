@@ -96,17 +96,26 @@ public class SpatialDisplayArchitectureTests
     {
         // A belt-and-braces check on the same property: the app must
         // not declare WH_MOUSE_LL / WH_KEYBOARD_LL at all.
+        //
+        // The ONE exception is the mouse barrier, which exists
+        // because the user asked for the cursor to be kept off the
+        // Rokid Max's own display.  It is checked separately, and
+        // much more strictly, below.
         var assembly = typeof(RokidDiyStation.App.Program).Assembly;
         var hookIds = new[] { 2, 3, 14 };   // WH_MOUSE_LL, WH_KEYBOARD_LL, WH_KEYBOARD
 
         foreach (var type in assembly.GetTypes())
         {
+            // The mouse barrier is the documented exception.
+            if (type.FullName == "RokidDiyStation.App.Spatial.MouseBarrier") continue;
+
             foreach (var method in type.GetMethods(
                          BindingFlags.Public | BindingFlags.NonPublic |
                          BindingFlags.Static | BindingFlags.Instance |
                          BindingFlags.DeclaredOnly))
             {
-                if (!method.Name.Contains("SetWindowsHookEx", StringComparison.Ordinal)) continue;
+                if (!method.Name.Contains("SetWindowsHookEx", StringComparison.Ordinal)
+                    && !method.Name.Contains("SetMouseHook", StringComparison.Ordinal)) continue;
 
                 // Find the hook id argument: it is the first int
                 // parameter, or a constant passed to a wrapper.
@@ -121,6 +130,60 @@ public class SpatialDisplayArchitectureTests
                             + "The virtual display handles input natively.");
                     }
                 }
+            }
+        }
+    }
+
+    [Fact]
+    public void The_Mouse_Barrier_Is_The_Only_Hook_And_It_Is_Scoped()
+    {
+        // The mouse barrier is a deliberate exception to the "no
+        // global hooks" rule, and it is only acceptable because it is
+        // SCOPED: the hook exists only while the spatial display is
+        // open, and it is torn down when the display is closed.
+        //
+        // A global mouse hook left running for the lifetime of the
+        // process would cost a hook call on every mouse move in the
+        // system, for the whole session, for no benefit.
+        var barrier = typeof(RokidDiyStation.App.Spatial.MouseBarrier);
+
+        // It must be disposable, so the hook can always be removed.
+        Assert.True(typeof(IDisposable).IsAssignableFrom(barrier));
+
+        // And it must expose the two halves of the lifecycle.
+        Assert.NotNull(barrier.GetMethod("Install"));
+        Assert.NotNull(barrier.GetMethod("Uninstall"));
+
+        // The station must own one and tear it down when the spatial
+        // display closes.
+        var station = typeof(RokidDiyStation.App.Spatial.SpatialStation);
+        var field = station.GetField("_mouseBarrier", BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(field);
+        Assert.Equal(barrier, field!.FieldType);
+    }
+
+    [Fact]
+    public void The_Barrier_Pushes_The_Cursor_Back_Without_Swallowing_Input()
+    {
+        // The barrier is a SOFT barrier: it moves the cursor back and
+        // lets the user get out.  ClipCursor would be a hard barrier,
+        // and it breaks the XP-Pen Artist 13.3's absolute digitiser -
+        // the kernel clamps the pen's coordinates to the nearest clip
+        // edge, so the user physically cannot draw.
+        //
+        // So ClipCursor must not be used.
+        var assembly = typeof(RokidDiyStation.App.Program).Assembly;
+
+        foreach (var type in assembly.GetTypes())
+        {
+            foreach (var method in type.GetMethods(
+                         BindingFlags.Public | BindingFlags.NonPublic |
+                         BindingFlags.Static | BindingFlags.Instance |
+                         BindingFlags.DeclaredOnly))
+            {
+                if (!method.Name.Contains("ClipCursor", StringComparison.Ordinal)) continue;
+                Assert.Fail($"{type.FullName}.{method.Name} uses ClipCursor, which breaks the "
+                    + "XP-Pen digitiser. The mouse barrier must stay soft.");
             }
         }
     }

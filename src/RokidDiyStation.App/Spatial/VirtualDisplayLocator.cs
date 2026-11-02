@@ -182,10 +182,24 @@ public static class VirtualDisplayLocator
     /// "\\.\DISPLAY14".
     /// </summary>
     /// <remarks>
-    /// Found by asking each attached adapter for its monitors and
-    /// looking for the IddCx one.  The virtual monitor's EDID is the
-    /// driver's own ("MTT1337"), which is how it is told apart from the
-    /// Rokid Max ("LBT4753").
+    /// Found by asking each adapter for its monitors and looking for
+    /// the IddCx one.  The virtual monitor's EDID is the driver's own
+    /// ("MTT1337"), which is how it is told apart from the Rokid Max
+    /// ("LBT4753").
+    ///
+    /// THE ATTACHED-TO-DESKTOP FLAG IS DELIBERATELY NOT CHECKED
+    /// -------------------------------------------------------------
+    /// A detached virtual display has an adapter whose StateFlags are
+    /// 0x0 - it is NOT attached to the desktop.  If that flag were
+    /// required here, the locator would find nothing exactly when it
+    /// needs to: when the display is closed and has to be opened
+    /// again.  The adapter is still enumerated, and its monitor still
+    /// carries the "MTT1337" EDID, so the display can be found and
+    /// re-attached.
+    ///
+    /// This was a real bug: the virtual display could be closed but
+    /// never opened again, because the locator skipped the very
+    /// adapter it needed.
     /// </remarks>
     public static string? FindVirtualAdapter()
     {
@@ -196,11 +210,7 @@ public static class VirtualDisplayLocator
 
         for (uint i = 0; EnumDisplayDevices(null, i, ref dd, 0); i++)
         {
-            if ((dd.StateFlags & 0x1) == 0) continue;
-
             var adapterName = dd.DeviceName;
-            var isVirtualAdapter = dd.DeviceString.Contains(
-                "Virtual", System.StringComparison.OrdinalIgnoreCase);
 
             var mon = new DisplayNative.DISPLAY_DEVICE
             {
@@ -208,10 +218,18 @@ public static class VirtualDisplayLocator
             };
             for (uint j = 0; EnumDisplayDevices(adapterName, j, ref mon, 0); j++)
             {
-                if ((mon.StateFlags & 0x1) == 0) continue;
-                if (IsVirtualMonitorId(mon.DeviceID) || isVirtualAdapter)
+                if (IsVirtualMonitorId(mon.DeviceID))
                     return adapterName;
             }
+        }
+
+        // Second pass: an adapter whose own description says it is a
+        // virtual display.  This catches a driver that has not
+        // published its monitor yet.
+        for (uint i = 0; EnumDisplayDevices(null, i, ref dd, 0); i++)
+        {
+            if (dd.DeviceString.Contains("Virtual", System.StringComparison.OrdinalIgnoreCase))
+                return dd.DeviceName;
         }
 
         return null;
@@ -330,7 +348,25 @@ public static class VirtualDisplayLocator
         if (testResult == DISP_CHANGE_FAILED)
             return false;
 
-        var result = ChangeDisplaySettingsEx(adapter, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero);
+        // THE REGISTRY IS NOT UPDATED ON THE DETACH.
+        //
+        // This is the difference between a reversible detach and a
+        // one-way door.  With CDS_UPDATEREGISTRY the zero-width mode
+        // is PERSISTED under the display device's key, and a
+        // zero-width mode is not a mode: EnumDisplaySettings on that
+        // adapter fails from then on, and every later attempt to put
+        // the monitor back returns DISP_CHANGE_FAILED (-1).
+        //
+        // Without it the change lives only in the session, the
+        // adapter keeps a valid current mode, and the monitor can be
+        // re-attached - either through this API or through the CCD
+        // API.
+        //
+        // The attach does update the registry, because a mode the
+        // user wants to keep should survive a logon.
+        var flags = width <= 0 || height <= 0 ? 0u : CDS_UPDATEREGISTRY;
+
+        var result = ChangeDisplaySettingsEx(adapter, ref dm, IntPtr.Zero, flags, IntPtr.Zero);
         return result != DISP_CHANGE_FAILED;
     }
 

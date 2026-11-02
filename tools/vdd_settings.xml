@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    The MttVDD settings, restored to the configuration the spatial
+    display was verified with (Stage 0).
+
+    WHY ONE RESOLUTION AND ONE REFRESH RATE
+    ----------------------------------------
+    The driver advertises a target mode for every (resolution,
+    refresh rate) pair in this file.  With the full set - 5
+    resolutions x 7 refresh rates - it publishes 35 target modes, and
+    Windows then refuses to attach the monitor:
+    ChangeDisplaySettingsEx returns DISP_CHANGE_FAILED (-1) for every
+    mode, and the display can never be put on the desktop.
+
+    With a single 1920x1080@60 entry - exactly the panel's native
+    viewport - the driver publishes one target mode, and the attach
+    works.
+
+    The spatial display is 1920x1080 because that is the Rokid Max's
+    per-eye viewport, and the cursor mapping u=(x-left)/W is exact
+    against it.
+-->
+<vdd_settings>
+    <monitors>
+        <count>1</count>
+    </monitors>
+    <gpu>
+        <friendlyname>default</friendlyname>
+    </gpu>
+    <global>
+        <g_refresh_rate>60</g_refresh_rate>
+    </global>
+    <resolutions>
+        <resolution>
+            <width>1920</width>
+            <height>1080</height>
+            <refresh_rate>60</refresh_rate>
+        </resolution>
+    </resolutions>
+    <options>
+        <CustomEdid>false</CustomEdid>
+        <PreventSpoof>false</PreventSpoof>
+        <EdidCeaOverride>false</EdidCeaOverride>
+        <HardwareCursor>true</HardwareCursor>
+        <SDR10bit>false</SDR10bit>
+        <HDRPlus>false</HDRPlus>
+        <logging>true</logging>
+        <debuglogging>true</debuglogging>
+    </options>
+</vdd_settings>

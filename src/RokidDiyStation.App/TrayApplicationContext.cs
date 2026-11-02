@@ -500,6 +500,17 @@ public sealed class TrayApplicationContext
         if (_quitting) return;
         _quitting = true;
         _tracking.Stop();
+
+        // The spatial display is closed on the way out, so the virtual
+        // monitor does not stay on the desktop after the app is gone.
+        //
+        // This matters: a leftover virtual monitor is a trap.  A
+        // window dragged onto it goes behind the glasses and is very
+        // hard to get back - and the user would not even know the
+        // app was the reason.
+        try { _station.CloseSpatialDisplay(); }
+        catch (Exception ex) { _mainWindow.AppendLog($"The spatial display could not be closed: {ex.Message}"); }
+
         _station.Dispose();
         try { _spaceHotkey?.Dispose(); } catch { }
         try { _rHotkey?.Dispose(); } catch { }
