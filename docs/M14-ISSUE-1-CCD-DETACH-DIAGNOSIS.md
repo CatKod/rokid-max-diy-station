@@ -203,7 +203,7 @@ are inert, because the key is selected by the connected topology.
    watcher unhooked **before** the detach, so the `WM_DISPLAYCHANGE`
    the detach itself provokes cannot start a re-attach.
 
-## 6. What was ruled out
+## 7. What was ruled out
 
 * **`DisplayConfigSetDeviceState`** does not exist. Checked against
   `wingdi.h` in the Windows 10 SDK. Path activation is only

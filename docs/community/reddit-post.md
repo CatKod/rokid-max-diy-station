@@ -9,7 +9,7 @@ So I built my own.
 ---
 
 **Repo:** https://github.com/CatKod/rokid-max-diy-station
-**Download (single .exe, no .NET install needed):** https://github.com/CatKod/rokid-max-diy-station/releases/tag/v0.3.1
+**Download (single .exe, no .NET install needed):** https://github.com/CatKod/rokid-max-diy-station/releases/tag/v0.3.2
 
 ---
 
