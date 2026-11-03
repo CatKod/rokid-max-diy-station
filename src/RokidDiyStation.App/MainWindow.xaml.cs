@@ -122,8 +122,6 @@ public partial class MainWindow : Window
         RawPosBox.IsChecked = true;
         AutostartBox.IsChecked = s.Autostart;
         StartMinBox.IsChecked  = s.StartMinimised;
-        ComfortConeSlider.Maximum = MaxComfortConeDegrees();
-        ComfortConeSlider.Value = Math.Min(s.ComfortConeDegrees, ComfortConeSlider.Maximum);
         PanelDistanceSlider.Value = s.PanelDistanceMetres;
         NeckScaleSlider.Value = s.NeckModelScale;
 
@@ -132,6 +130,20 @@ public partial class MainWindow : Window
         CursorScaleSlider.Minimum = Core.Spatial.CursorSize.MinScale;
         CursorScaleSlider.Maximum = Core.Spatial.CursorSize.MaxScale;
         CursorScaleSlider.Value = Core.Spatial.CursorSize.Clamp((float)s.CursorScale);
+
+        // The panel scale slider's range comes from the core too, for
+        // the same reason.  The persisted value may be a fraction (from
+        // an older settings file) or a percentage (from the slider);
+        // the core resolves which one wins.
+        PanelScaleSlider.Minimum = Core.Spatial.PanelScale.MinPercent;
+        PanelScaleSlider.Maximum = Core.Spatial.PanelScale.MaxPercent;
+        PanelScaleSlider.Value = Core.Spatial.PanelScale.ToPercent(
+            TrayApplicationContext.ResolvePanelFraction(s));
+
+        // The comfort cone's maximum depends on the panel's size, so
+        // it can only be derived AFTER the panel scale is known.
+        ComfortConeSlider.Maximum = MaxComfortConeDegrees();
+        ComfortConeSlider.Value = Math.Min(s.ComfortConeDegrees, ComfortConeSlider.Maximum);
 
         // Set the radio button BEFORE wiring up the handler, or the
         // Checked event fires with the other button's state still
@@ -159,9 +171,21 @@ public partial class MainWindow : Window
     /// </remarks>
     private double MaxComfortConeDegrees()
     {
-        var s = _settingsService.Current;
+        // The cone's maximum depends on how much of the field of view
+        // the panel covers: a bigger panel leaves less room for the
+        // cone to move in before the panel's edge would be clipped.
+        //
+        // So the maximum has to follow the LIVE panel scale, not the
+        // persisted one - otherwise the user could set a big panel and
+        // a wide cone, and the panel would be clipped while the gaze
+        // was still inside the "rigid" cone, which is exactly the
+        // promise the comfort cone makes.
+        var fraction = PanelScaleSlider is not null
+            ? Core.Spatial.PanelScale.FromPercent(PanelScaleSlider.Value)
+            : TrayApplicationContext.ResolvePanelFraction(_settingsService.Current);
+
         return Core.Spatial.SpatialAnchorOptions.MaxUnclippedConeDegrees(
-            (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0),
+            fraction,
             Core.Spatial.RokidDisplayProfile.DiagonalFovDegrees);
     }
 
@@ -176,6 +200,7 @@ public partial class MainWindow : Window
             ? "none"
             : $"{NeckScaleSlider.Value * 100:0}%";
         CursorScaleLabel.Text = $"{CursorScaleSlider.Value:0.00}×";
+        PanelScaleLabel.Text = $"{PanelScaleSlider.Value:0}%";
 
         // The comfort cone only means anything in comfort-cone mode, so
         // the whole row is hidden in strict world-lock mode.  Hiding it
@@ -233,6 +258,88 @@ public partial class MainWindow : Window
 
         // The station may not be attached yet.
         _station?.ApplyCursorScale(scale);
+    }
+
+    /// <summary>
+    /// The user changed the panel's scale - how much of the glasses'
+    /// field of view it covers.
+    /// </summary>
+    /// <remarks>
+    /// Applied LIVE, like the anchoring mode.  The panel is re-sized
+    /// IN PLACE by the anchor service, so it keeps its centre, its
+    /// normal and its up axis: the screen stays where it is in the
+    /// room and only changes size.  Re-pinning instead would move it
+    /// to wherever the user happens to be looking, which is a
+    /// surprise nobody asked for.
+    ///
+    /// The arrow's size follows automatically: it is measured against
+    /// the panel's own width, so it keeps its size RELATIVE to the
+    /// content no matter how the panel is scaled.
+    /// </remarks>
+    private void OnPanelScaleChanged(object sender, RoutedEventArgs e)
+    {
+        // This handler is wired in XAML, so it fires during XAML
+        // parsing too, before the label and the station exist.  Every
+        // access therefore has to be guarded.
+        if (PanelScaleSlider is null) return;
+
+        var fraction = Core.Spatial.PanelScale.FromPercent(PanelScaleSlider.Value);
+
+        if (PanelScaleLabel is not null)
+            PanelScaleLabel.Text = $"{Core.Spatial.PanelScale.ToPercent(fraction):0}%";
+
+        // The comfort cone's maximum depends on the panel's size, so
+        // it has to be re-derived and the current value re-clamped.
+        // A cone that is too wide would break its own promise: the
+        // panel would be clipped while the gaze was still inside the
+        // "rigid" cone.
+        //
+        // The cone's slider may not exist yet (during XAML parsing),
+        // so it has to be guarded like everything else here.
+        if (ComfortConeSlider is not null)
+        {
+            var maxCone = MaxComfortConeDegrees();
+            ComfortConeSlider.Maximum = maxCone;
+            if (ComfortConeSlider.Value > maxCone)
+                ComfortConeSlider.Value = maxCone;
+        }
+
+        // The station may not be attached yet.
+        _station?.ApplyAnchorOptions(CurrentAnchorOptions(fraction));
+    }
+
+    /// <summary>
+    /// The anchor options implied by the current state of the sliders.
+    /// </summary>
+    /// <remarks>
+    /// This is the single place that turns the window's controls into
+    /// the core's options, so the live path (a slider moved) and the
+    /// save path ("Save settings" pressed) cannot disagree about what
+    /// the panel's size should be.
+    /// </remarks>
+    /// <param name="panelFraction">
+    /// The panel's angular size, as a fraction of the field of view.
+    /// </param>
+    private Core.Spatial.SpatialAnchorOptions CurrentAnchorOptions(float panelFraction)
+    {
+        var s = _settingsService.Current;
+        var fovFraction = Core.Spatial.PanelScale.Clamp(panelFraction);
+
+        return new Core.Spatial.SpatialAnchorOptions
+        {
+            WorldLock = ComfortConeRadio.IsChecked == true
+                ? Core.Spatial.WorldLockMode.ComfortCone
+                : Core.Spatial.WorldLockMode.Strict,
+            // Clamped to what the display can actually show, so the
+            // persisted value and the effective value agree.
+            ComfortConeDegrees = (float)Math.Clamp(
+                s.ComfortConeDegrees, 0.0,
+                Core.Spatial.SpatialAnchorOptions.MaxUnclippedConeDegrees(fovFraction)),
+            ComfortConeRatePerSecond = (float)Math.Clamp(s.ComfortConeRatePerSecond, 0.0, 10.0),
+            NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
+            PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),
+            PanelFovFraction = fovFraction,
+        };
     }
 
     public void UpdateStatus(TrackingStatus s)
@@ -342,23 +449,15 @@ public partial class MainWindow : Window
             NeckModelScale = NeckScaleSlider.Value,
         };
 
-        var fovFraction = (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0);
+        // The panel's scale comes from the SLIDER when the window is
+        // driving it, and from the persisted settings otherwise.  The
+        // slider is the live control, so it wins when the two could
+        // disagree.
+        var fraction = PanelScaleSlider is not null
+            ? Core.Spatial.PanelScale.FromPercent(PanelScaleSlider.Value)
+            : TrayApplicationContext.ResolvePanelFraction(s);
 
-        _station?.ApplyAnchorOptions(new Core.Spatial.SpatialAnchorOptions
-        {
-            WorldLock = ComfortConeRadio.IsChecked == true
-                ? Core.Spatial.WorldLockMode.ComfortCone
-                : Core.Spatial.WorldLockMode.Strict,
-            // Clamped to what the display can actually show, so the
-            // persisted value and the effective value agree.
-            ComfortConeDegrees = (float)Math.Clamp(
-                s.ComfortConeDegrees, 0.0,
-                Core.Spatial.SpatialAnchorOptions.MaxUnclippedConeDegrees(fovFraction)),
-            ComfortConeRatePerSecond = (float)Math.Clamp(s.ComfortConeRatePerSecond, 0.0, 10.0),
-            NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
-            PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),
-            PanelFovFraction = fovFraction,
-        });
+        _station?.ApplyAnchorOptions(CurrentAnchorOptions(fraction));
     }
 
     /// <summary>Tell the window that the next close is a real quit.
@@ -372,6 +471,7 @@ public partial class MainWindow : Window
             MessageBox.Show(this, "Port must be 1..65535", "Rokid DiyStation", MessageBoxButton.OK, MessageBoxImage.Warning);
             return;
         }
+        var panelFraction = Core.Spatial.PanelScale.FromPercent(PanelScaleSlider.Value);
         var next = _settingsService.Current with
         {
             UdpHost = HostBox.Text.Trim(),
@@ -386,6 +486,13 @@ public partial class MainWindow : Window
             PanelDistanceMetres = PanelDistanceSlider.Value,
             NeckModelScale = NeckScaleSlider.Value,
             CursorScale = CursorScaleSlider.Value,
+            // The panel's scale is persisted in BOTH forms: the
+            // percentage is what the user chose on the slider, and the
+            // fraction is what the maths actually uses.  Keeping them
+            // in step is what lets the core resolve them without
+            // guessing.
+            PanelScalePercent = Core.Spatial.PanelScale.ToPercent(panelFraction),
+            PanelFovFraction = panelFraction,
         };
         _settingsService.Update(next);
         // Apply the spatial options live, so the user sees the effect

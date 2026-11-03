@@ -67,13 +67,16 @@ reports mirroring, flipping and clipping as a pass, which is exactly why
   Mahony filter
 - **Pins the virtual display in 3D space** on the glasses' Micro-OLED, so
   it tracks the world rather than the eyes
+- **Resizable panel** — the panel can cover anything from 25 % to 100 % of
+  the glasses' field of view, adjustable live with a slider
 - **Draws a custom 3D mouse cursor** in the scene, with an adjustable size
-  (0.25× – 4.0×)
+  (0.25× – 4.0×) that stays proportional to the panel
 - **Forwards every click, wheel tick and keystroke** — because the target is
   a *real* Windows display, the OS does all of it natively
 - **Streams the head pose as FreeTrack-compatible UDP**, so OpenTrack and
   nearly every flight/sim game picks it up
-- **Runs quietly in the system tray**, with optional autostart
+- **Runs quietly in the system tray**, with optional autostart and a
+  one-click **reload** if something gets into a bad state
 
 ### What makes it "real"
 
@@ -196,6 +199,64 @@ is a **BIOS setting**, not something an application can influence.
 
 `Ctrl+Shift+Win+Alt` is the most-modified combination Windows offers that
 still produces a real key event, so that is what the app uses.
+
+---
+
+## 🎛️ The tray menu
+
+Right-click the cyan "R" in the system tray:
+
+| Item | What it does |
+| --- | --- |
+| Show settings | Opens the settings window |
+| Open / Close the spatial display | Attaches or detaches the virtual monitor |
+| Bring the mouse back | Returns the cursor to your physical screen |
+| Pin panel here / Forget the panel | The anchoring actions, as hotkeys |
+| Recenter view | Rebases the world origin |
+| **Reload the app** | Restarts the app in place |
+| Quit | Exits |
+
+### About "Reload the app"
+
+A few small faults only clear when the app is cycled — the capture
+session can end up in a state where it never delivers a frame again,
+and a display path can be left in a state that a fresh attach resolves.
+Rather than chase each of them, this button does what "quit and start
+again" does.
+
+It is not simply "run the exe again":
+
+- the outgoing instance **releases the virtual display** first, so the
+  new one can attach it;
+- the new instance is started with a `--reload` flag, which makes it
+  **wait for the outgoing one to exit** and take over, instead of
+  concluding that another copy is already running and quitting;
+- the new instance starts minimised, so a repair action does not throw
+  a window in your face;
+- if the relaunch fails, the old instance **stays alive** and says so
+  in the log. An app that has torn itself down and cannot start again
+  is worse than the fault the reload was meant to clear.
+
+---
+
+## 📐 The panel's size
+
+The **Panel scale** slider in the settings window sets how much of the
+Rokid Max's field of view the panel covers, from **25 % to 100 %**, in
+**5 %** steps.
+
+It is applied **live**: the panel is re-sized *in place*, so it keeps
+its position in the room and only changes size. It does not jump to
+wherever you happen to be looking.
+
+Two things worth knowing:
+
+- **100 % is a hard ceiling.** The panel may fill the entire field of
+  view, but not more: past that the content would simply be clipped
+  off the edges while you believed you could see all of it.
+- **The mouse cursor follows automatically.** The arrow is sized as a
+  fraction of the *panel*, not as a fixed size in metres, so it keeps
+  the same size relative to the content however you scale the panel.
 
 ---
 

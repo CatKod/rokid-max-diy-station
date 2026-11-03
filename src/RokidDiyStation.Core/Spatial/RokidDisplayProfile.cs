@@ -139,11 +139,20 @@ public static class RokidDisplayProfile
     ///
     /// where theta_p is the subtended angle.  With theta_p = f * theta_h
     /// this becomes W = 2 D tan(f * theta_h / 2).
+    ///
+    /// NOTE that the width does NOT depend on the distance in ANGULAR
+    /// terms: the width grows with the distance in exactly the ratio
+    /// that keeps the subtended angle constant.  That is what makes
+    /// the panel's scale an angular setting - see
+    /// <see cref="PanelScale"/>.
+    ///
+    /// The fraction is clamped to the range the glasses can actually
+    /// show, so the panel can never be wider than the field of view.
     /// </remarks>
     public static float PanelWidth(float distance, float fovFraction, float diagonalFovDegrees = DiagonalFovDegrees)
     {
         var thetaH = ToRadians(HorizontalFovDegrees(diagonalFovDegrees));
-        return 2f * distance * MathF.Tan(thetaH * fovFraction * 0.5f);
+        return 2f * distance * MathF.Tan(thetaH * PanelScale.Clamp(fovFraction) * 0.5f);
     }
 
     /// <summary>

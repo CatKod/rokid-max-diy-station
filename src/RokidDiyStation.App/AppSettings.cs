@@ -92,7 +92,28 @@ public sealed record AppSettings
     /// The fraction of the glasses' horizontal field of view the panel
     /// covers.  0.5 means the panel subtends half the FOV.
     /// </summary>
-    public double PanelFovFraction { get; init; } = 0.5;
+    /// <remarks>
+    /// This is the panel's ANGULAR size: it does not depend on the
+    /// panel's distance, so changing it changes the panel's size and
+    /// nothing else.  The value is clamped to
+    /// [PanelScale.MinFraction, PanelScale.MaxFraction] - 25 % to
+    /// 100 % - when it is applied, so a hand-edited settings file
+    /// cannot produce a panel wider than the glasses can show.
+    /// </remarks>
+    public double PanelFovFraction { get; init; } = Core.Spatial.PanelScale.DefaultFraction;
+
+    /// <summary>
+    /// The panel's angular size as a PERCENTAGE, which is what the
+    /// settings window's slider shows.
+    /// </summary>
+    /// <remarks>
+    /// This is the persisted form of <see cref="PanelFovFraction"/>.
+    /// The percentage is the unit the user thinks in ("make the panel
+    /// 60 % of the screen"), and the slider's ticks are 5 % apart, so
+    /// storing the value the user actually chose avoids rounding drift
+    /// between the slider's position and the panel's real size.
+    /// </remarks>
+    public double PanelScalePercent { get; init; } = Core.Spatial.PanelScale.DefaultPercent;
 
     /// <summary>
     /// The size of the virtual 3D cursor, as a scale factor.

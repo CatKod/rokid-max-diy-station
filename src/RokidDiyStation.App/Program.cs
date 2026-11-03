@@ -36,7 +36,7 @@ internal static class Program
             return 0;
         }
 
-        var single = new SingleInstance();
+        var single = new SingleInstance(takeOver: args.Contains("--reload"));
         if (!single.IsOwner)
         {
             // Another copy is running; ask it to show its window and exit.
@@ -61,7 +61,29 @@ internal static class Program
         var tracking = new TrackingService(settings, settingsService);
         var tray = new TrayApplicationContext(settingsService, tracking);
         single.OnShowRequested += _ => tray.OnExternalShowRequested(0);
-        app.Exit += (_, _) => tray.Quit();
+
+        // A reload can be requested from the outside - by a script, a
+        // diagnostic tool, or a test - through the same pipe that
+        // carries the "show the window" signal.  That is what makes
+        // the reload verifiable: the hard part is the interaction
+        // between two processes, and an interaction that can only be
+        // triggered by a mouse click cannot be checked automatically.
+        single.OnReloadRequested += () => tray.RequestReload();
+
+        // The single-instance mutex is released EXPLICITLY on the way
+        // out, not left to the garbage collector.
+        //
+        // This matters for the reload: the replacement instance is
+        // started before this one has finished exiting, so it finds
+        // the mutex held and waits for it.  If the release happened at
+        // an unpredictable moment - or never, because the finalizer
+        // never runs before the process is killed - the replacement
+        // would sit there until its deadline expired.
+        app.Exit += (_, _) =>
+        {
+            tray.Quit();
+            single.ReleaseOwnership();
+        };
 
         // Defer the initial window show until the WPF dispatcher is
         // running.  Showing before Application.Run() starts the

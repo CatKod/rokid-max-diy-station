@@ -60,6 +60,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
                 <!--
                     The source of the panel's content.
@@ -146,6 +147,40 @@
                             Minimum="0.25" Maximum="4" TickFrequency="0.25" IsSnapToTickEnabled="True" Width="200"
                             ValueChanged="OnCursorScaleChanged"/>
                     <TextBlock x:Name="CursorScaleLabel" VerticalAlignment="Center" MinWidth="80" Margin="8,0,0,0"/>
+                </StackPanel>
+
+                <!--
+                    The panel's SCALE: how much of the glasses' field of
+                    view it covers.
+
+                    This is the setting that was missing.  The panel used
+                    to be hard-coded at 50 % of the field of view, and
+                    that number was baked into the anchor service's
+                    options, so there was no way to make the panel
+                    bigger or smaller.
+
+                    The range is 25 % to 100 %.  The top end is a hard
+                    limit, not a preference: above 100 % the panel
+                    would extend past what the glasses can show, and
+                    the content would simply be clipped off the edges
+                    while the user believed they could see all of it.
+
+                    The step is 5 %.  One percent would be fiddly to aim
+                    at; ten would be too coarse to land on a size that
+                    is nearly right.
+
+                    The value is applied LIVE, like the anchoring mode:
+                    the panel is re-sized IN PLACE, so it keeps its
+                    position in the room and does not teleport to
+                    wherever the user happens to be looking.
+                -->
+                <TextBlock Grid.Row="4" Grid.Column="0" Text="Panel scale" VerticalAlignment="Center" Margin="0,8,0,0"
+                           ToolTip="How much of the Rokid Max's field of view the panel covers. 100 % fills the whole view; 25 % is a small panel in the middle."/>
+                <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="8,8,0,0">
+                    <Slider x:Name="PanelScaleSlider"
+                            Minimum="25" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True" Width="200"
+                            ValueChanged="OnPanelScaleChanged"/>
+                    <TextBlock x:Name="PanelScaleLabel" VerticalAlignment="Center" MinWidth="80" Margin="8,0,0,0"/>
                 </StackPanel>
             </Grid>
         </GroupBox>

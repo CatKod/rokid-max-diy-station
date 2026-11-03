@@ -6,6 +6,43 @@
 // can't run at once and fight over the HID device.  When the second
 // instance starts it sends a "show" message to the first via a named
 // pipe and exits; the first brings the settings window to the front.
+//
+// THE RELOAD PATH
+// ---------------
+// The app has a "reload" action that restarts it, and the reload
+// breaks the assumption above.  The new instance is started BEFORE the
+// old one has finished exiting, so at the moment the new one looks at
+// the mutex the old one still holds it.
+//
+// The new instance would therefore conclude "another copy is running",
+// signal the old one to show its window, and exit - leaving the user
+// with no app at all, which is the exact opposite of what they asked
+// for.
+//
+// So the reload starts the replacement with a "--reload" flag, and an
+// instance started with that flag does not signal and exit: it WAITS
+// for the mutex to become free, takes it over, and carries on.  That
+// is the only difference between the two modes, and it is what makes
+// the reload reliable.
+//
+// The wait has a deadline.  If the old instance is wedged and never
+// releases the mutex, the replacement must not hang forever: it
+// falls back to the normal "signal and exit" behaviour, which at
+// least brings the old instance's window to the front.
+//
+// THE PIPE PROTOCOL
+// -----------------
+// The pipe carries a single line, and the line is a command:
+//
+//   "<hwnd>"     bring the settings window to the front
+//   "reload"     restart the app in place
+//
+// The reload command exists so that the reload can be driven from the
+// outside - by a script, by a diagnostic tool, or by a test - without
+// clicking the tray menu.  That matters because the reload's whole
+// difficulty is in the INTERACTION between two processes, and an
+// interaction that can only be triggered by a mouse click cannot be
+// verified automatically.
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -17,17 +54,108 @@ public sealed class SingleInstance : IDisposable
 {
     private const string MutexName = @"Local\RokidDiyStation.SingleInstance";
     private const string PipeName = "RokidDiyStation.ShowWindow";
+
+    /// <summary>
+    /// How long a replacement instance waits for the outgoing one to
+    /// release the mutex.
+    /// </summary>
+    /// <remarks>
+    /// The outgoing instance releases the mutex as the very last thing
+    /// it does, so this only has to cover a normal shutdown - a
+    /// fraction of a second.  The generous deadline is there for the
+    /// case where the outgoing instance is busy tearing the virtual
+    /// display down, which can take a moment.
+    /// </remarks>
+    private const int TakeoverTimeoutMs = 15000;
+
+    /// <summary>How long to wait between attempts to take the mutex.</summary>
+    private const int TakeoverPollMs = 100;
+
     private readonly Mutex _mutex;
     private CancellationTokenSource? _listenerCts;
+    private bool _released;
 
-    public bool IsOwner { get; }
+    public bool IsOwner { get; private set; }
+
+    /// <summary>
+    /// True when this instance is a replacement that waited for the
+    /// outgoing one to go away.
+    /// </summary>
+    public bool TookOver { get; private set; }
+
+    /// <summary>
+    /// Raised when the pipe asks for a reload.
+    /// </summary>
+    /// <remarks>
+    /// The reload is driven from here rather than from the pipe's
+    /// listener thread, because it has to touch WPF and the GPU.
+    /// </remarks>
+    public event Action? OnReloadRequested;
+
     public event Action<int>? OnShowRequested;
 
-    public SingleInstance()
+    /// <summary>
+    /// Create the single-instance guard.
+    /// </summary>
+    /// <param name="takeOver">
+    /// True when this instance is a RELOAD replacement.  It waits for
+    /// the outgoing instance to release the mutex instead of signalling
+    /// it and exiting.
+    /// </param>
+    public SingleInstance(bool takeOver = false)
     {
         _mutex = new Mutex(initiallyOwned: true, MutexName, out var createdNew);
-        IsOwner = createdNew;
-        if (IsOwner) StartPipeServer();
+
+        if (createdNew)
+        {
+            IsOwner = true;
+            StartPipeServer();
+            return;
+        }
+
+        if (takeOver && TryTakeOver())
+        {
+            IsOwner = true;
+            TookOver = true;
+            StartPipeServer();
+            return;
+        }
+
+        // The normal path: another copy is already running, so hand the
+        // "show the window" signal to it and exit.
+    }
+
+    /// <summary>
+    /// Wait for the outgoing instance to release the mutex and take it.
+    /// </summary>
+    /// <returns>True when the mutex was taken within the deadline.</returns>
+    private bool TryTakeOver()
+    {
+        var deadline = Environment.TickCount64 + TakeoverTimeoutMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            try
+            {
+                // WaitOne(0) would spin the CPU; a short wait blocks
+                // efficiently and still returns promptly.
+                if (_mutex.WaitOne(TakeoverPollMs))
+                    return true;
+            }
+            catch (AbandonedMutexException)
+            {
+                // The outgoing instance died without releasing the
+                // mutex.  We own it now - this is exactly the state we
+                // want, and the exception is the successful outcome.
+                return true;
+            }
+            catch (Exception)
+            {
+                // Anything else (e.g. the mutex is not in a waitable
+                // state) is not worth retrying forever.
+                return false;
+            }
+        }
+        return false;
     }
 
     private void StartPipeServer()
@@ -38,29 +166,104 @@ public sealed class SingleInstance : IDisposable
         {
             while (!token.IsCancellationRequested)
             {
+                NamedPipeServerStream? server = null;
                 try
                 {
-                    using var server = new NamedPipeServerStream(
-                        PipeName, PipeDirection.In, maxNumberOfServerInstances: 1,
-                        PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                    // The pipe may still be held by the outgoing
+                    // instance in the reload path - the new instance
+                    // takes over the mutex a moment before the old
+                    // process has actually exited.  Creating a second
+                    // server on the same name fails while the first one
+                    // is alive, so the creation is retried rather than
+                    // giving up: without it, a later double-click on
+                    // the exe would find no listener and the window
+                    // would never come to the front.
+                    while (!token.IsCancellationRequested)
+                    {
+                        try
+                        {
+                            server = new NamedPipeServerStream(
+                                PipeName, PipeDirection.In, maxNumberOfServerInstances: 1,
+                                PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                            break;
+                        }
+                        catch (IOException)
+                        {
+                            server = null;
+                            try { await Task.Delay(250, token).ConfigureAwait(false); }
+                            catch (OperationCanceledException) { break; }
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            server = null;
+                            try { await Task.Delay(250, token).ConfigureAwait(false); }
+                            catch (OperationCanceledException) { break; }
+                        }
+                    }
+
+                    if (server is null) break;
+
                     await server.WaitForConnectionAsync(token).ConfigureAwait(false);
                     using var reader = new StreamReader(server, Encoding.UTF8);
                     var payload = await reader.ReadToEndAsync().ConfigureAwait(false);
-                    if (int.TryParse(payload.Trim(), out var hwnd))
-                    {
-                        OnShowRequested?.Invoke(hwnd);
-                    }
-                    else
-                    {
-                        OnShowRequested?.Invoke(0);
-                    }
+                    Dispatch(payload.Trim());
                 }
                 catch (OperationCanceledException) { break; }
                 catch (IOException) { /* client died, try again */ }
-                catch (UnauthorizedAccessException) { /* already a server, bail */ break; }
+                catch (UnauthorizedAccessException) { /* pipe taken, try again */ }
+                finally
+                {
+                    try { server?.Dispose(); } catch { }
+                }
             }
         }, token);
     }
+
+    /// <summary>
+    /// Act on a command from the pipe.
+    /// </summary>
+    /// <param name="payload">The command line.</param>
+    private void Dispatch(string payload)
+    {
+        // The BOM matters here.
+        //
+        // `new StreamWriter(stream, Encoding.UTF8)` writes a BOM
+        // preamble, because Encoding.UTF8 carries one.  The payload
+        // therefore arrives as "\uFEFFreload", and the exact
+        // comparison against the command would fail.
+        //
+        // This did not show up for the "show" command, because
+        // int.TryParse simply rejects the BOM and the code falls
+        // through to "show hwnd 0" - which happens to be the right
+        // answer anyway.  So the show path worked BY ACCIDENT, and the
+        // reload path, which needs an exact match, did not work at
+        // all.
+        //
+        // Both ends now write without a BOM, and the BOM is stripped
+        // here as well so that a client written against the old
+        // behaviour still works.
+        var command = payload.Trim().TrimStart('\uFEFF').Trim();
+
+        if (string.Equals(command, ReloadCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            OnReloadRequested?.Invoke();
+            return;
+        }
+
+        if (int.TryParse(command, out var hwnd))
+        {
+            OnShowRequested?.Invoke(hwnd);
+        }
+        else
+        {
+            OnShowRequested?.Invoke(0);
+        }
+    }
+
+    /// <summary>
+    /// The pipe command that asks the running instance to reload.
+    /// </summary>
+    public const string ReloadCommand = "reload";
 
     /// <summary>Ask the running instance to show its window.  Returns true
     /// if a signal was delivered (i.e. another instance was already running).</summary>
@@ -70,7 +273,8 @@ public sealed class SingleInstance : IDisposable
         {
             using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out);
             client.Connect(timeout: 500);
-            using var writer = new StreamWriter(client, Encoding.UTF8);
+            // UTF8Encoding(false) - no BOM.  See Dispatch().
+            using var writer = new StreamWriter(client, new UTF8Encoding(false));
             writer.Write(hwnd.ToString());
             writer.Flush();
             return true;
@@ -79,13 +283,46 @@ public sealed class SingleInstance : IDisposable
         catch (IOException) { return false; }
     }
 
+    /// <summary>
+    /// Ask the running instance to reload itself.
+    /// </summary>
+    /// <returns>True when the command was delivered.</returns>
+    public static bool SignalReload()
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out);
+            client.Connect(timeout: 2000);
+            // UTF8Encoding(false) - no BOM.  See Dispatch().
+            using var writer = new StreamWriter(client, new UTF8Encoding(false));
+            writer.Write(ReloadCommand);
+            writer.Flush();
+            return true;
+        }
+        catch (TimeoutException) { return false; }
+        catch (IOException) { return false; }
+    }
+
+    /// <summary>
+    /// Release the mutex, so another instance can take over.
+    /// </summary>
+    /// <remarks>
+    /// The outgoing instance calls this on its way out.  It has to be
+    /// explicit: relying on the finalizer would mean the mutex was
+    /// released at an unpredictable moment, and the replacement
+    /// instance would be racing a garbage collector.
+    /// </remarks>
+    public void ReleaseOwnership()
+    {
+        if (!IsOwner || _released) return;
+        _released = true;
+        try { _mutex.ReleaseMutex(); } catch { }
+    }
+
     public void Dispose()
     {
         try { _listenerCts?.Cancel(); } catch { }
-        if (IsOwner)
-        {
-            try { _mutex.ReleaseMutex(); } catch { }
-        }
+        ReleaseOwnership();
         _mutex.Dispose();
     }
 }

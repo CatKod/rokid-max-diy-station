@@ -1262,7 +1262,17 @@ public sealed class PanelRenderer : IDisposable
         // The cursor's size comes from the user's setting, so it can be
         // changed while the app is running.  The scale is uniform, so
         // the arrow keeps its aspect ratio and is never stretched.
-        var (cursorWidth, cursorHeight) = Core.Spatial.CursorSize.SizeMetres(_cursorScale);
+        //
+        // The size is measured against the PANEL'S OWN WIDTH, not
+        // against a fixed size in metres.  That is what makes the two
+        // settings independent: changing the panel's scale (how much
+        // of the field of view the panel covers) keeps the arrow the
+        // same size RELATIVE to the content, so the user does not have
+        // to re-tune the cursor size every time they change the
+        // panel's scale.  A fixed size in metres would have silently
+        // changed the arrow's apparent size relative to the content.
+        var (cursorWidth, cursorHeight) =
+            Core.Spatial.CursorSize.SizeMetres(_cursorScale, pose.Width);
 
         var hx = viewerRight * (cursorWidth * 0.5f);
         var hy = up * (cursorHeight * 0.5f);

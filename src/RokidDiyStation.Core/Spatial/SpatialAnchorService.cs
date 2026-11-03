@@ -139,7 +139,20 @@ public sealed record SpatialAnchorOptions
 {
     public float PanelDistance { get; init; } = 1.5f;
 
-    public float PanelFovFraction { get; init; } = 0.5f;
+    /// <summary>
+    /// The fraction of the glasses' horizontal field of view the panel
+    /// covers.
+    /// </summary>
+    /// <remarks>
+    /// The value is clamped to
+    /// [PanelScale.MinFraction, PanelScale.MaxFraction] wherever it is
+    /// used to SIZE the panel, so a bad value cannot produce a panel
+    /// wider than the glasses can show.  The property itself keeps
+    /// whatever it was given, because the comfort-cone maths compares
+    /// the fraction against the FOV and the two have to be talking
+    /// about the same number.
+    /// </remarks>
+    public float PanelFovFraction { get; init; } = PanelScale.DefaultFraction;
 
     public float DiagonalFovDegrees { get; init; } = RokidDisplayProfile.DiagonalFovDegrees;
 

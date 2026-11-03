@@ -39,20 +39,38 @@ public sealed class TrayApplicationContext
     /// surface of the spatial maths.  This is the only place that
     /// knows how to map one onto the other.
     /// </remarks>
-    private static Core.Spatial.SpatialAnchorOptions BuildAnchorOptions(AppSettings s) => new()
+    private static Core.Spatial.SpatialAnchorOptions BuildAnchorOptions(AppSettings s)
     {
-        WorldLock = ParseWorldLock(s.WorldLockMode),
-        // Clamped to the widest cone the display can actually show: a
-        // wider cone cannot keep its promise of a fully visible panel.
-        ComfortConeDegrees = (float)Math.Clamp(
-            s.ComfortConeDegrees, 0.0,
-            Core.Spatial.SpatialAnchorOptions.MaxUnclippedConeDegrees(
-                (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0))),
-        ComfortConeRatePerSecond = (float)Math.Clamp(s.ComfortConeRatePerSecond, 0.0, 10.0),
-        NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
-        PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),
-        PanelFovFraction = (float)Math.Clamp(s.PanelFovFraction, 0.1, 1.0),
-    };
+        var fraction = ResolvePanelFraction(s);
+
+        return new Core.Spatial.SpatialAnchorOptions
+        {
+            WorldLock = ParseWorldLock(s.WorldLockMode),
+            // Clamped to the widest cone the display can actually show: a
+            // wider cone cannot keep its promise of a fully visible panel.
+            ComfortConeDegrees = (float)Math.Clamp(
+                s.ComfortConeDegrees, 0.0,
+                Core.Spatial.SpatialAnchorOptions.MaxUnclippedConeDegrees(fraction)),
+            ComfortConeRatePerSecond = (float)Math.Clamp(s.ComfortConeRatePerSecond, 0.0, 10.0),
+            NeckModelScale = (float)Math.Clamp(s.NeckModelScale, 0.0, 1.0),
+            PanelDistance = (float)Math.Clamp(s.PanelDistanceMetres, 0.3, 10.0),
+            PanelFovFraction = fraction,
+        };
+    }
+
+    /// <summary>
+    /// The panel's angular size, as a fraction of the field of view.
+    /// </summary>
+    /// <remarks>
+    /// The settings file carries the panel's scale in two forms - a
+    /// fraction and a percentage - and only one of them can be
+    /// authoritative.  <see cref="Core.Spatial.PanelScale.Resolve"/>
+    /// owns that rule, so the tray, the settings window and the
+    /// persisted file can never disagree about how big the panel is.
+    /// </remarks>
+    public static float ResolvePanelFraction(AppSettings s)
+        => Core.Spatial.PanelScale.Resolve(
+            (float?)s.PanelFovFraction, s.PanelScalePercent);
 
     /// <summary>
     /// Map the persisted mode name onto the enum.
@@ -139,8 +157,154 @@ public sealed class TrayApplicationContext
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Forget the panel (Ctrl+R)",     Command = new RelayCommand(_ => _tracking.ResetAnchor()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Recenter view (Ctrl+C)",        Command = new RelayCommand(_ => _mainWindow.Recenter()) });
         menu.Items.Add(new System.Windows.Controls.Separator());
+        menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Reload the app", Command = new RelayCommand(_ => Reload()) });
         menu.Items.Add(new System.Windows.Controls.MenuItem { Header = "Quit", Command = new RelayCommand(_ => Quit()) });
         return menu;
+    }
+
+    /// <summary>
+    /// Ask the app to reload, from outside.
+    /// </summary>
+    /// <remarks>
+    /// The pipe listener calls this from a background thread, so the
+    /// actual work is marshalled to the UI thread.
+    /// </remarks>
+    public void RequestReload()
+    {
+        if (_mainWindow.Dispatcher.CheckAccess()) Reload();
+        else _mainWindow.Dispatcher.BeginInvoke(new Action(Reload));
+    }
+
+    /// <summary>
+    /// Restart the app in place, without the user having to hunt for the
+    /// exe and start it again.
+    /// </summary>
+    /// <remarks>
+    /// The user's reason for wanting this is worth recording, because it
+    /// explains why this is a RELOAD and not a bug fix: several small
+    /// faults only clear when the app is cycled - the capture session
+    /// can end up in a state where it never delivers a frame again, and
+    /// the display path can be left in a state that a fresh attach
+    /// resolves.  Rather than chase each of them, the user asked for
+    /// one button that does what "quit and start again" does.
+    ///
+    /// HOW IT IS DONE
+    /// --------------
+    /// The app cannot simply re-launch itself and exit: the virtual
+    /// display has to be RELEASED first, or the new instance finds a
+    /// virtual display that is already attached and its own attach
+    /// fails.
+    ///
+    /// So the order is:
+    ///
+    ///   1. save the settings, so nothing the user changed is lost;
+    ///   2. tear the spatial station down - which closes the virtual
+    ///      display and takes the mouse barrier off;
+    ///   3. stop the tracker and release the hotkeys;
+    ///   4. start a NEW instance of the same exe, which takes over
+    ///      because the single-instance mutex has been released;
+    ///   5. quit.
+    ///
+    /// The new instance's "show the window" signal is not used: the
+    /// user asked for a reload, and a window popping up in their face
+    /// unasked is the opposite of what they want.  The new instance
+    /// starts minimised exactly as the current one did.
+    ///
+    /// If the relaunch fails for any reason, the app says so in the log
+    /// and STAYS ALIVE, because an app that has torn itself down and
+    /// cannot start again is worse than the fault the reload was meant
+    /// to clear.
+    /// </remarks>
+    private void Reload()
+    {
+        _mainWindow.AppendLog("Reloading…");
+
+        // 1. Persist whatever the user changed and never pressed "Save"
+        //    for.
+        try { _settingsService.Save(); }
+        catch (Exception ex) { _mainWindow.AppendLog($"Could not save the settings: {ex.Message}"); }
+
+        // 2. Release the virtual display and the mouse barrier BEFORE
+        //    the new instance starts, or the new instance finds the
+        //    display already attached and its own attach fails.
+        try { _station.CloseSpatialDisplay(); }
+        catch (Exception ex) { _mainWindow.AppendLog($"Could not close the spatial display: {ex.Message}"); }
+
+        // 3. Stop the tracker and the hotkeys.
+        try { _tracking.Stop(); }
+        catch (Exception ex) { _mainWindow.AppendLog($"Could not stop the tracker: {ex.Message}"); }
+
+        // 4. Start the new instance.  The single-instance mutex is
+        //    released by the OLD instance's disposal, which happens in
+        //    Quit() below - so the new instance has to be started
+        //    AFTER that, or it will find the mutex still held, signal
+        //    the old instance to show its window, and exit.
+        //
+        //    That ordering is why the relaunch is scheduled on the
+        //    dispatcher rather than done inline: Quit() has to run
+        //    first.
+        _mainWindow.Dispatcher.BeginInvoke(new Action(() => StartReplacementAndQuit()));
+    }
+
+    /// <summary>
+    /// Start a fresh copy of the app and then quit this one.
+    /// </summary>
+    /// <remarks>
+    /// This runs on the dispatcher, AFTER <see cref="Quit"/> has
+    /// released the single-instance mutex - otherwise the new instance
+    /// would find the mutex held, ask this one to show its window, and
+    /// exit, leaving the user with no app at all.
+    /// </remarks>
+    private void StartReplacementAndQuit()
+    {
+        var exe = Environment.ProcessPath;
+        if (exe is null || !File.Exists(exe))
+        {
+            _mainWindow.AppendLog(
+                "Reload failed: the running executable could not be located, so this "
+                + "instance is staying alive. Quit and start the app again by hand.");
+            return;
+        }
+
+        try
+        {
+            // The replacement starts minimised for the same reason the
+            // original did: a reload is a repair action, and a window
+            // appearing in the user's face is not what they asked for.
+            //
+            // The "--reload" flag tells the replacement that the
+            // outgoing instance is EXPECTED to still be running, so it
+            // waits for the single-instance mutex instead of concluding
+            // that another copy is already running and exiting.
+            var psi = new System.Diagnostics.ProcessStartInfo(exe)
+            {
+                UseShellExecute = false,
+                WorkingDirectory = Path.GetDirectoryName(exe) ?? AppDomain.CurrentDomain.BaseDirectory,
+            };
+            psi.ArgumentList.Add("--minimised");
+            psi.ArgumentList.Add("--reload");
+
+            var started = System.Diagnostics.Process.Start(psi);
+            if (started is null)
+            {
+                _mainWindow.AppendLog(
+                    "Reload failed: the new instance could not be started, so this "
+                    + "instance is staying alive.");
+                return;
+            }
+
+            _mainWindow.AppendLog("A fresh instance is starting up.");
+        }
+        catch (Exception ex)
+        {
+            _mainWindow.AppendLog(
+                $"Reload failed: {ex.Message}. This instance is staying alive.");
+            return;
+        }
+
+        // 5. Quit this instance, which releases the mutex and lets the
+        //    new instance claim it.
+        Quit();
     }
 
     /// <summary>
