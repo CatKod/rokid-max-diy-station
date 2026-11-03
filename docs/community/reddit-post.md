@@ -9,7 +9,7 @@ So I built my own.
 ---
 
 **Repo:** https://github.com/CatKod/rokid-max-diy-station
-**Download (single .exe, no .NET install needed):** https://github.com/CatKod/rokid-max-diy-station/releases/tag/v0.3.0
+**Download (single .exe, no .NET install needed):** https://github.com/CatKod/rokid-max-diy-station/releases/tag/v0.3.1
 
 ---
 
@@ -43,7 +43,7 @@ The fix was to stop faking it entirely:
 
 The whole CDP stack was deleted. ~2,000 lines became ~80. And every application works.
 
-Written in C# / .NET 8 — WPF tray shell, D3D11 renderer, Windows Graphics Capture for the display feed, HidSharp for USB HID. 296 tests passing.
+Written in C# / .NET 8 — WPF tray shell, D3D11 renderer, Windows Graphics Capture for the display feed, HidSharp for USB HID. 328 tests passing.
 
 ## Screenshots
 

@@ -62,13 +62,28 @@ driver reads; keep it valid XML.
 ### Build and test
 
 ```powershell
-dotnet test -c Release          # 244 tests
+dotnet test -c Release          # 328 tests
+
+# The fast build: a folder.  `artifacts\release\RokidDiyStation.exe`
+# runs from there.  Good enough for testing on this machine.
 dotnet publish src\RokidDiyStation.App\RokidDiyStation.App.csproj `
     -c Release -r win-x64 --self-contained false -o artifacts\release
+
+# The SHIPPED build: one self-contained exe, so the user needs no
+# .NET runtime.  This is what goes into the GitHub release, and it is
+# the shape the README promises.
+dotnet publish src\RokidDiyStation.App\RokidDiyStation.App.csproj `
+    -c Release -r win-x64 --self-contained true `
+    -p:PublishSingleFile=true `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
+    -p:EnableCompressionInSingleFile=true `
+    -o artifacts\single
 ```
 
-The release build is a single folder; `artifacts\release\RokidDiyStation.exe`
-runs from there.
+Do not confuse the two: the release asset is the **single** file from
+`artifacts\single`, not the folder build. Shipping the folder build
+would leave the user needing a .NET install that the README says they
+do not need.
 
 ### Commit discipline
 
