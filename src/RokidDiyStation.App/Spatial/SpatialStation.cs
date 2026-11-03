@@ -43,6 +43,7 @@
 // None of that should take the tray app down.
 using System.IO;
 using System.Numerics;
+using System.Threading;
 using RokidDiyStation.Core.Spatial;
 using Vortice.Direct3D11;
 
@@ -134,6 +135,14 @@ public sealed class SpatialStation : IDisposable
         _renderer.OnError += msg => Log($"Renderer: {msg}");
         _renderer.OnFrameRate += fps => OnFrameRate?.Invoke(fps);
         _renderer.Cursor = _cursor;
+
+        // The display-configuration diagnostics go into the app's log.
+        //
+        // The attach and the detach fail for reasons the user cannot
+        // guess at, and "the virtual display could not be detached" is
+        // not an actionable message.  The SetDisplayConfig error code
+        // is.
+        DisplayConfigController.OnDiagnostic += line => Log($"Display config: {line}");
 
         // The capture pulls its frame HERE, on the render thread.
         //
@@ -241,6 +250,29 @@ public sealed class SpatialStation : IDisposable
             _guard.OnLog += line => Log(line);
             PanelRenderer.DisplayChanged += _guard.Check;
 
+            // The topology watcher keeps the VIRTUAL display's state
+            // honest.
+            //
+            // The user's report: the virtual display could not be
+            // disabled once the number of physical monitors changed.
+            // Two things were going on:
+            //
+            //   1. The detach itself was broken - the CCD call sent
+            //      the wrong positions and Windows refused it.  That
+            //      is fixed in DisplayConfigController.
+            //
+            //   2. Windows RESETS the topology when a monitor is
+            //      plugged or unplugged.  The CCD DATABASE still
+            //      records the virtual display as active, so a
+            //      topology rebuild can put it BACK on the desktop,
+            //      usually repositioned above the other displays -
+            //      which is exactly what the user saw.
+            //
+            // So the topology has to be CHECKED after every display
+            // change, and the virtual display re-asserted if it came
+            // back when it should not have.
+            PanelRenderer.DisplayChanged += OnTopologyChanged;
+
             _pumpThread = new Thread(() => PumpLoop(_cts!.Token))
             {
                 IsBackground = true,
@@ -259,6 +291,15 @@ public sealed class SpatialStation : IDisposable
             _cts?.Cancel();
             _cts = null;
         }
+
+        // The display-changed subscriptions are dropped here, because
+        // Start() adds them again.  Leaving them in place would make
+        // every stop/start cycle add another handler, and after a few
+        // cycles a single display change would trigger several
+        // reconciliations - each of them doing a CCD query and an
+        // attach or a detach, undoing each other's work.
+        if (_guard is not null) PanelRenderer.DisplayChanged -= _guard.Check;
+        PanelRenderer.DisplayChanged -= OnTopologyChanged;
 
         // Drop the renderer's borrowed reference to the capture's
         // texture before the capture disposes it — see StopCapture for
@@ -318,11 +359,18 @@ public sealed class SpatialStation : IDisposable
         // answers DISP_CHANGE_FAILED (-1) for every mode and every
         // field combination.  So it could never work here anyway, and
         // keeping it only risked the one-way door.
+        //
+        // The desired state is recorded FIRST, so that a display
+        // change that arrives while the attach is in flight is still
+        // reconciled against the user's intent.
+        _virtualDisplayShouldBeOpen = true;
+
         if (!VirtualDisplayController.Open())
         {
             Log("The virtual display could not be attached. "
                 + "Is the Virtual Display Driver installed?");
             SetState(SpatialState.Error, "The virtual display is not available.");
+            _virtualDisplayShouldBeOpen = false;
             return false;
         }
 
@@ -335,6 +383,7 @@ public sealed class SpatialStation : IDisposable
         {
             Log("The virtual display was attached but did not appear.");
             SetState(SpatialState.Error, "The virtual display did not appear.");
+            _virtualDisplayShouldBeOpen = false;
             return false;
         }
 
@@ -368,6 +417,13 @@ public sealed class SpatialStation : IDisposable
     /// </remarks>
     public bool CloseSpatialDisplay()
     {
+        // The desired state is recorded FIRST.  Windows rebuilds the
+        // topology when a monitor is plugged or unplugged, and the
+        // rebuild brings the virtual display back - because the
+        // database still records it as active.  Recording the intent
+        // first means the topology watcher knows what to put right.
+        _virtualDisplayShouldBeOpen = false;
+
         // The barrier goes first, so the cursor is free while the
         // display is being torn down.
         UninstallMouseBarrier();
@@ -483,6 +539,111 @@ public sealed class SpatialStation : IDisposable
         var x = primary.Bounds.X + primary.Bounds.Width / 2;
         var y = primary.Bounds.Y + primary.Bounds.Height / 2;
         return NativeMethods.SetCursorPos(x, y);
+    }
+
+    // -----------------------------------------------------------------
+    // The topology watcher
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Whether the user wants the virtual display to be on the desktop.
+    /// </summary>
+    /// <remarks>
+    /// This is the DESIRED STATE, and it is what makes the topology
+    /// watcher able to undo Windows' meddling.
+    ///
+    /// Windows rebuilds the display topology from the CCD DATABASE
+    /// when a monitor is plugged or unplugged, and the database still
+    /// records the virtual display as active - because the detach is
+    /// applied WITHOUT SDC_SAVE_TO_DATABASE, so it lives only in the
+    /// session.
+    ///
+    /// The consequence is that a topology rebuild can put the virtual
+    /// display BACK on the desktop, usually repositioned above the
+    /// other displays.  That is precisely what the user reported: the
+    /// VDD would not stay disabled after the number of physical
+    /// monitors changed.
+    ///
+    /// So the watcher compares what IS on the desktop against what
+    /// SHOULD be on the desktop, and puts it right.
+    /// </remarks>
+    private volatile bool _virtualDisplayShouldBeOpen;
+
+    /// <summary>
+    /// Guards against two reconciliations running at once.
+    /// </summary>
+    /// <remarks>
+    /// Windows sends SEVERAL display-change messages for one physical
+    /// change - one per affected monitor - and each one queues a
+    /// reconciliation.  Without this guard two of them can run
+    /// concurrently, each of them doing a CCD query and an attach or
+    /// a detach, and they can undo each other's work.
+    ///
+    /// The flag is set before the work starts and cleared after, so a
+    /// message that arrives during a reconciliation is simply
+    /// ignored - the reconciliation that is running has already read
+    /// the desired state, and it re-reads it at the end anyway.
+    /// </remarks>
+    private int _reconciling;
+
+    /// <summary>
+    /// Re-check the virtual display's state after a topology change.
+    /// </summary>
+    /// <remarks>
+    /// This runs on a thread-pool thread: the panel's window procedure
+    /// raises the display-changed event from inside the message
+    /// handler, and a CCD query there would stall the render thread.
+    /// </remarks>
+    private void OnTopologyChanged()
+    {
+        // Only one reconciliation at a time.
+        if (Interlocked.Exchange(ref _reconciling, 1) == 1) return;
+
+        try
+        {
+            // Windows sends several display-change messages in a row
+            // for one physical change - one per affected monitor - so
+            // this is debounced.  Acting on the first one would race
+            // with Windows' own re-layout.
+            Thread.Sleep(600);
+
+            bool shouldBeOpen = _virtualDisplayShouldBeOpen;
+            bool isOpen = DisplayConfigController.IsVirtualActive();
+
+            if (shouldBeOpen == isOpen) return;
+
+            if (shouldBeOpen)
+            {
+                // The virtual display should be there and is not.  Put
+                // it back where the spatial panel expects it.
+                Log("The display layout changed and the spatial display went with it — "
+                    + "putting it back.");
+                if (VirtualDisplayController.Open())
+                    Log("The spatial display is back.");
+                else
+                    Log("The spatial display could not be put back.");
+            }
+            else
+            {
+                // The virtual display should NOT be there and is.  This
+                // is the user's bug: Windows put it back when it
+                // rebuilt the topology.
+                Log("The display layout changed and the virtual display came back — "
+                    + "taking it off the desktop again.");
+                if (VirtualDisplayController.Close())
+                    Log("The virtual display is off the desktop again.");
+                else
+                    Log("The virtual display could not be taken off the desktop.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"The display layout changed and the virtual display could not be re-checked: {ex.Message}");
+        }
+        finally
+        {
+            Volatile.Write(ref _reconciling, 0);
+        }
     }
 
     // -----------------------------------------------------------------
@@ -670,6 +831,13 @@ public sealed class SpatialStation : IDisposable
 
     public void Dispose()
     {
+        // The display-changed event is STATIC - the panel's window
+        // procedure is static too - so the subscription has to be
+        // undone, or the station stays reachable from a static
+        // delegate after it has been disposed.
+        if (_guard is not null) PanelRenderer.DisplayChanged -= _guard.Check;
+        PanelRenderer.DisplayChanged -= OnTopologyChanged;
+
         Stop();
         _capture.Dispose();
         _feedback?.Dispose();

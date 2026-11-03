@@ -41,6 +41,41 @@
 // GetCursorInfo is a cheap, non-hooking call, and it also hands us the
 // current cursor SHAPE, so the 3D cursor can become an I-beam over
 // text and a resize arrow over a window edge.
+//
+// IT ALSO HANDS US THE VISIBILITY, WHICH IS WHAT MAKES THE 3D CURSOR
+// BEHAVE LIKE A REAL ONE
+// --------------------------------------------------------------
+// The user's report: playing a 3D game in mouselook mode, the game
+// hides and locks the system cursor - and the 3D cursor, which we
+// draw ourselves, kept floating in front of their face and blocked
+// the view.
+//
+// The fix is to READ the visibility rather than to guess at it.
+// GetCursorInfo returns CURSORINFO.flags, and:
+//
+//   * CURSOR_SHOWING is clear when the cursor is hidden - either
+//     because the application called ShowCursor(FALSE) or
+//     SetCursor(NULL), or because the application is in a
+//     full-screen mouselook loop;
+//   * hCursor is NULL in the same cases.
+//
+// THE DISTINCTION THAT MATTERS
+// -----------------------------
+// Our OWN app hides the system cursor too, over the Rokid Max's own
+// display, by answering WM_SETCURSOR with SetCursor(NULL).  That is
+// a DIFFERENT hiding from the game's, and the two must not be
+// confused:
+//
+//   * OUR hiding applies to the glasses' own display - the panel
+//     window - and the pointer is NOT over the virtual display when
+//     it happens, so the 3D cursor is not drawn anyway.
+//
+//   * The GAME's hiding happens on the virtual display, with the
+//     pointer over it, and it is the one that has to suppress the 3D
+//     cursor.
+//
+// So the test is simply: is the system cursor currently visible?  If
+// the OS says it is not, the 3D cursor is not drawn either.
 using System.Runtime.InteropServices;
 using RokidDiyStation.Core.Spatial;
 
@@ -149,6 +184,26 @@ public sealed class SpatialPointerFeedback : IDisposable
             OnCursorShapeChanged?.Invoke(ci.hCursor);
         }
 
+        // IS THE SYSTEM CURSOR VISIBLE?
+        //
+        // This is the check that makes the 3D cursor behave like the
+        // real one.  When an application on the virtual display hides
+        // the system cursor - a game in mouselook mode, or a full
+        // screen video - the 3D cursor has to go with it, or it floats
+        // in front of the user and blocks the view.
+        //
+        // Two signals, either of which is enough:
+        //
+        //   * CURSOR_SHOWING clear - the cursor is hidden.
+        //   * hCursor NULL - there is no cursor shape at all, which is
+        //     what SetCursor(NULL) leaves behind.
+        //
+        // The 3D cursor is still TRACKED while it is suppressed: the
+        // position is kept up to date, so it comes straight back when
+        // the application shows the cursor again.
+        bool osCursorVisible = CursorVisibility.IsOsCursorVisible(
+            (ci.flags & CURSOR_SHOWING) != 0, ci.hCursor != IntPtr.Zero);
+
         var monitor = _monitorProvider();
         if (monitor is null)
         {
@@ -166,6 +221,11 @@ public sealed class SpatialPointerFeedback : IDisposable
         }
 
         SetInside(true);
+
+        // The suppression is applied BEFORE the early-out below, so a
+        // cursor that is hidden while it sits still still takes effect
+        // immediately.
+        _cursor.Suppress(!osCursorVisible);
 
         // Nothing to do if the cursor has not moved.  The virtual cursor
         // only rebuilds its quad when it is dirty, so skipping this
@@ -185,7 +245,10 @@ public sealed class SpatialPointerFeedback : IDisposable
         get
         {
             var ci = new CURSORINFO { cbSize = Marshal.SizeOf<CURSORINFO>() };
-            return GetCursorInfo(ref ci) && (ci.flags & CURSOR_SHOWING) != 0;
+            if (!GetCursorInfo(ref ci)) return false;
+
+            return CursorVisibility.IsOsCursorVisible(
+                (ci.flags & CURSOR_SHOWING) != 0, ci.hCursor != IntPtr.Zero);
         }
     }
 

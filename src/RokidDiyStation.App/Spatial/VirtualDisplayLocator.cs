@@ -4,16 +4,18 @@
 //
 // The spatial display is an IddCx virtual monitor that lives OUTSIDE
 // the visible physical desktop, at negative coordinates - typically
-// (-1920, 0), just to the left of the primary display.  Two things
-// follow from that, and both are handled here:
+// (-1920, 0), just to the left of the primary display.
 //
-//   1. It is found by its POSITION, not by its device name.  The
-//      "\\.\DISPLAYn" index is assigned by enumeration order and
-//      changes between reboots and whenever a monitor is hot-plugged,
-//      so it is worthless as an identity.  The rectangle is stable.
+// It is found by its HARDWARE IDENTITY - the driver's own EDID
+// ("MTT1337") - and never by its position.  The position is where it
+// is PUT, which is a different question from what it IS; see
+// FindVirtual() for why the distinction matters, and for what the
+// position-based fallback used to get wrong.
 //
-//   2. It is POSITIONED with ChangeDisplaySettingsEx, not by asking the
-//      user to drag it around in the Windows settings app.
+// The legacy positioning API - ChangeDisplaySettingsEx - is still
+// here, because it is how the attach and the detach were done before
+// the CCD API took over.  It is no longer the mechanism for the
+// spatial display's lifecycle.
 //
 // Why negative coordinates are deliberate
 // ---------------------------------------
@@ -243,12 +245,19 @@ public static class VirtualDisplayLocator
     /// The driver publishes a hardcoded EDID whose manufacturer and
     /// product id are "MTT1337".  That is stable across reboots and
     /// re-enumeration, unlike the "\\.\DISPLAYn" index.
+    ///
+    /// The decision is shared with the CCD controller, so the two
+    /// always agree on which display is the virtual one.
     /// </remarks>
     public static bool IsVirtualMonitorId(string? deviceId)
     {
         if (string.IsNullOrWhiteSpace(deviceId)) return false;
-        return deviceId.Contains("MTT1337", System.StringComparison.OrdinalIgnoreCase)
-            || deviceId.Contains("MttVDD", System.StringComparison.OrdinalIgnoreCase)
+
+        // The Win32 device id is "MONITOR\MTT1337\{...}", so the same
+        // fingerprint works on it.
+        if (VirtualDisplayIdentity.MatchesDevicePath(deviceId)) return true;
+
+        return deviceId.Contains("MttVDD", System.StringComparison.OrdinalIgnoreCase)
             || deviceId.StartsWith("ROOT\\DISPLAY", System.StringComparison.OrdinalIgnoreCase);
     }
 
@@ -268,21 +277,39 @@ public static class VirtualDisplayLocator
     /// Find the virtual display.
     /// </summary>
     /// <remarks>
-    /// Preferred criterion is the EDID (stable), with the rectangle as
-    /// the fallback: the virtual monitor is the one that lives outside
-    /// the visible desktop, at negative coordinates.
+    /// The EDID is the criterion, always.  The rectangle is NOT used
+    /// as a fallback, and that used to be a real bug.
+    ///
+    /// The fallback was: "if no monitor has the virtual EDID, take the
+    /// one at negative coordinates".  The idea was that the spatial
+    /// display is deliberately placed at negative coordinates.
+    ///
+    /// But a NEGATIVE coordinate is not a property of the virtual
+    /// display - it is a property of WHERE THE USER PUT IT.  When the
+    /// user rearranges the desktop - which is exactly what happens
+    /// when they unplug a monitor - Windows re-lays-out the desktop
+    /// and the virtual display can end up anywhere, INCLUDING at
+    /// positive coordinates.  The user's own report says so: with one
+    /// or two physical monitors the VDD sat ABOVE the others, which
+    /// is a positive Y and possibly a positive X.
+    ///
+    /// Worse, the fallback would pick up the WRONG display: a
+    /// physical monitor that happens to sit to the left of the origin
+    /// would be reported as the virtual one.  Then the capture would
+    /// target the wrong screen, the cursor mapping would be wrong, and
+    /// the panel would show the laptop's desktop instead of the
+    /// spatial canvas.
+    ///
+    /// So the fallback is gone.  If the EDID does not identify the
+    /// virtual display, it is not found - and the caller treats that
+    /// as "the virtual display is not attached", which is the truth.
     /// </remarks>
     public static MonitorInfo? FindVirtual()
     {
         var all = Enumerate();
         if (all.Count == 0) return null;
 
-        var byId = all.FirstOrDefault(m => m.IsVirtual);
-        if (byId is not null) return byId;
-
-        // Fall back to position: the spatial display is deliberately
-        // placed at negative coordinates.
-        return all.FirstOrDefault(m => m.Bounds.Left < 0);
+        return all.FirstOrDefault(m => m.IsVirtual);
     }
 
     /// <summary>

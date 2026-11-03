@@ -48,6 +48,7 @@ public sealed class VirtualCursor
     private float _u = 0.5f;
     private float _v = 0.5f;
     private bool _active;
+    private bool _suppressed;
     private bool _dirty = true;
 
     /// <summary>
@@ -66,6 +67,39 @@ public sealed class VirtualCursor
     /// True while the cursor is over the virtual display.
     /// </summary>
     public bool IsActive { get { lock (_lock) return _active; } }
+
+    /// <summary>
+    /// True while the cursor is suppressed - the application inside
+    /// the virtual display has hidden the system cursor.
+    /// </summary>
+    /// <remarks>
+    /// This is a DIFFERENT thing from being inactive, and the
+    /// distinction matters:
+    ///
+    ///   * INACTIVE means the pointer is not over the virtual display
+    ///     - there is nothing to draw.
+    ///
+    ///   * SUPPRESSED means the pointer IS over the virtual display,
+    ///     but the application running on it has taken the cursor away
+    ///     - a game in mouselook mode, for instance.
+    ///
+    /// A suppressed cursor is still tracked - the position is kept
+    /// up to date - it is just not DRAWN.  That is what gives the
+    /// clean view the user asked for, and it is what lets the cursor
+    /// come straight back when the game shows it again.
+    /// </remarks>
+    public bool IsSuppressed { get { lock (_lock) return _suppressed; } }
+
+    /// <summary>
+    /// True when the cursor should be DRAWN.
+    /// </summary>
+    /// <remarks>
+    /// This is the single question the renderer asks, and it folds
+    /// both conditions together: the pointer has to be over the
+    /// virtual display, and the application on it must not have
+    /// hidden the cursor.
+    /// </remarks>
+    public bool ShouldRender { get { lock (_lock) return _active && !_suppressed; } }
 
     /// <summary>
     /// True when the cursor has moved since this was last read.
@@ -109,6 +143,30 @@ public sealed class VirtualCursor
         {
             if (!_active) return;
             _active = false;
+            _dirty = true;
+        }
+    }
+
+    /// <summary>
+    /// Hide the cursor without untracking it.
+    /// </summary>
+    /// <remarks>
+    /// The application on the virtual display has taken the system
+    /// cursor away - a game in mouselook mode, for instance - so the
+    /// 3D cursor has to go too, or it hovers in front of the player's
+    /// face and blocks the view.
+    ///
+    /// The position is NOT forgotten, so when the application shows
+    /// the cursor again the 3D cursor comes straight back, in the
+    /// right place.
+    /// </remarks>
+    /// <param name="suppressed">True to hide it, false to show it.</param>
+    public void Suppress(bool suppressed)
+    {
+        lock (_lock)
+        {
+            if (_suppressed == suppressed) return;
+            _suppressed = suppressed;
             _dirty = true;
         }
     }

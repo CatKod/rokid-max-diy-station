@@ -1237,7 +1237,7 @@ public sealed class PanelRenderer : IDisposable
     private void DrawCursor(PanelPose pose, Matrix4x4 mvp)
     {
         var cursor = _cursor;
-        if (cursor is null || !cursor.IsActive) return;
+        if (cursor is null || !cursor.ShouldRender) return;
         if (_cursorVertexBuffer is null || _cursorSrv is null || _cursorPixelShader is null) return;
 
         var (u, v) = cursor.Position;

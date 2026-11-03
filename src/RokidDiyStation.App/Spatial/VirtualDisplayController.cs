@@ -54,11 +54,17 @@
 //
 // THE POSITION
 // -------------
-// The virtual monitor goes to (-1920, 0), immediately to the LEFT of
-// the primary display.  It must not overlap the Rokid Max's own
-// display at (3840, 0): Windows forbids overlapping monitor
-// rectangles outright, and our own WS_EX_TOPMOST opaque AR panel
-// would occlude the capture.
+// The virtual monitor goes immediately to the LEFT of the leftmost
+// display that is on the desktop.  It must not overlap the Rokid
+// Max's own display: Windows forbids overlapping monitor rectangles
+// outright, and our own WS_EX_TOPMOST opaque AR panel would occlude
+// the capture.
+//
+// The position is COMPUTED, not hardcoded - see
+// ComputeAttachPosition() for why a fixed coordinate is a bug.
+
+using RokidDiyStation.Core.Spatial;
+
 namespace RokidDiyStation.App.Spatial;
 
 /// <summary>
@@ -101,6 +107,56 @@ public static class VirtualDisplayController
     /// </summary>
     public const int Height = 1080;
 
+    /// <summary>
+    /// Place the virtual display where nothing else is.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The position used to be a constant, (-1920, 0), and that was a
+    /// second, quieter version of the same bug the user reported: a
+    /// hardcoded coordinate is a guess about the machine's layout, and
+    /// the guess is wrong whenever the layout is different from the
+    /// one the constant was written for.
+    /// </para>
+    /// <para>
+    /// With one or two physical monitors, (-1920, 0) can land ON a
+    /// physical display - Windows forbids overlapping monitor
+    /// rectangles outright - and the attach then fails with 87
+    /// (ERROR_INVALID_PARAMETER).  With three, it happened to be free.
+    /// </para>
+    /// <para>
+    /// So the position is COMPUTED: the virtual display is placed to
+    /// the LEFT of the leftmost display that is on the desktop, with a
+    /// gap.  That is where it belongs anyway - it is the spatial
+    /// canvas, it must not overlap the Rokid Max (our own topmost
+    /// panel would occlude the capture), and it must not overlap any
+    /// physical display (Windows forbids it).
+    /// </para>
+    /// <para>
+    /// If there is nothing on the desktop at all, the historical
+    /// position is used.
+    /// </para>
+    /// </remarks>
+    /// <returns>The position to place the virtual display at.</returns>
+    public static (int X, int Y) ComputeAttachPosition()
+    {
+        var monitors = VirtualDisplayLocator.Enumerate();
+
+        // The virtual display itself is excluded: it may still be
+        // listed from a previous session, and anchoring to itself
+        // would make the position depend on where it used to be.
+        var rects = new System.Collections.Generic.List<DesktopRect>();
+        foreach (var m in monitors)
+        {
+            if (m.IsVirtual) continue;
+            rects.Add(new DesktopRect(
+                m.Bounds.Left, m.Bounds.Top,
+                m.Bounds.Right, m.Bounds.Bottom));
+        }
+
+        return SpatialDisplayPlacement.Compute(rects, Width, Height, OffsetX, 0);
+    }
+
     /// <summary>How long to wait for the monitor to appear, in ms.</summary>
     private const int AppearTimeoutMs = 8000;
 
@@ -120,10 +176,18 @@ public static class VirtualDisplayController
     /// <returns>True when the display is on the desktop afterwards.</returns>
     public static bool Open()
     {
+        // The position is COMPUTED, not hardcoded.  A fixed (-1920, 0)
+        // lands on a physical display when the desktop layout is
+        // different from the one the constant was written for, and
+        // Windows refuses overlapping displays outright - so the
+        // attach would fail on exactly the machines whose layout had
+        // changed.
+        var (x, y) = ComputeAttachPosition();
+
         // The CCD attach is the whole mechanism: the adapter is
         // always attached to the machine, so there is nothing to
         // "publish" first.
-        if (!DisplayConfigController.Attach(OffsetX, 0))
+        if (!DisplayConfigController.Attach(x, y))
         {
             // It may already be attached - which is a success, not a
             // failure.  The user asked for it to be open, and it is.

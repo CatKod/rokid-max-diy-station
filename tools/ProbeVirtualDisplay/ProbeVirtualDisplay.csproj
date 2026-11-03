@@ -2,15 +2,15 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.26100.0</TargetFramework>
     <Nullable>enable</Nullable>
-    <ImplicitUsings>disable</ImplicitUsings>
-    <RootNamespace>ProbeVirtualDisplay</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>RokidDiyStation.Tools.ProbeVirtualDisplay</RootNamespace>
     <AssemblyName>ProbeVirtualDisplay</AssemblyName>
-    <!-- EnumDisplayDevices / EnumDisplaySettings are ANSI. -->
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- The probe opens a real WinForms window on the virtual monitor. -->
-    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\RokidDiyStation.App\RokidDiyStation.App.csproj" />
+  </ItemGroup>
 
 </Project>

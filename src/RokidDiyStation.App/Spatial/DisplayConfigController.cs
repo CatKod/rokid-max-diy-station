@@ -197,8 +197,45 @@ public static class DisplayConfigController
     /// <summary>DISPLAYCONFIG_PATH_ACTIVE.</summary>
     private const uint PATH_ACTIVE = 0x00000001;
 
-    /// <summary>The virtual display's EDID fingerprint.</summary>
-    private const string VirtualEdidFingerprint = "MTT1337";
+    /// <summary>
+    /// The virtual display's EDID fingerprint.
+    /// </summary>
+    /// <remarks>
+    /// This is the driver-specific part of the target's device path:
+    ///
+    ///   \\?\DISPLAY#MTT1337#1&28a6823a&9&UID256#{e6f07b5f-...}
+    ///
+    /// The "MTT1337" is the EDID's manufacturer-and-product field, and
+    /// it is the ONLY part of the virtual display's identity that does
+    /// not change when the machine's display topology changes.  See
+    /// <see cref="IsVirtualTarget"/> for why that matters.
+    /// </remarks>
+    private const string VirtualEdidFingerprint = VirtualDisplayIdentity.EdidFingerprint;
+
+    /// <summary>
+    /// The virtual display's friendly name, as the driver reports it.
+    /// </summary>
+    /// <remarks>
+    /// "VDD by MTT".  This is a second, independent fingerprint: if a
+    /// future driver version changes the EDID, the name still matches.
+    /// </remarks>
+    private const string VirtualFriendlyName = VirtualDisplayIdentity.FriendlyName;
+
+    /// <summary>
+    /// Diagnostics from the display-configuration calls.
+    /// </summary>
+    /// <remarks>
+    /// The attach and the detach can fail for reasons the user cannot
+    /// guess at, and "the virtual display could not be detached" is not
+    /// an actionable message.  The reason - including the exact
+    /// SetDisplayConfig error code - is reported through this.
+    /// </remarks>
+    public static event Action<string>? OnDiagnostic;
+
+    private static void Log(string message)
+    {
+        try { OnDiagnostic?.Invoke(message); } catch { }
+    }
 
     // -----------------------------------------------------------------
     // The API - with the SDK's signatures, exactly.
@@ -423,6 +460,72 @@ public static class DisplayConfigController
         => QueryAny(QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS, QDC_DATABASE_CURRENT) is not null;
 
     /// <summary>
+    /// Whether a CCD target is the IddCx virtual display.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS IS THE FUNCTION THAT HAD TO CHANGE, AND WHY.
+    /// </para>
+    /// <para>
+    /// The user reported that the virtual display could not be
+    /// disabled when the number of physical monitors changed: with
+    /// three physical monitors the detach worked, but with one or two
+    /// the VDD stayed on the desktop in Extended mode, usually
+    /// repositioned above the other displays.
+    /// </para>
+    /// <para>
+    /// The suspicion was that the finder depended on something that
+    /// changes with the topology - a coordinate, an enumeration index.
+    /// That suspicion was RIGHT, but not in the way it was framed: the
+    /// fingerprint itself was fine, and the <em>query</em> was the
+    /// problem.  See <see cref="Detach"/> for the details.
+    /// </para>
+    /// <para>
+    /// What matters here is that the identification is by HARDWARE
+    /// IDENTITY and never by position or index:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// The EDID fingerprint - "MTT1337" - in the target's device
+    /// path.  This is the driver-specific part:
+    /// <c>\\?\DISPLAY#MTT1337#1&amp;28a6823a&amp;9&amp;UID256#{...}</c>.
+    /// The part after the fingerprint is the port and instance, which
+    /// DO change when the topology changes - so only the fingerprint
+    /// itself is matched.
+    /// </description></item>
+    /// <item><description>
+    /// The friendly name - "VDD by MTT" - as an independent second
+    /// fingerprint, in case a driver version changes the EDID.
+    /// </description></item>
+    /// <item><description>
+    /// The EDID manufacturer and product code fields, read through
+    /// DISPLAYCONFIG_TARGET_DEVICE_NAME.  These are the raw EDID
+    /// bytes, and they are the most hardware-like identity available:
+    /// they describe the monitor, not the port it is plugged into.
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// None of these is a coordinate, an enumeration index, or a
+    /// device path index.  The virtual display is found the same way
+    /// whether it is at (-1920,0), at (1915,-1080), or anywhere else.
+    /// </para>
+    /// </remarks>
+    /// <param name="adapterId">The target's adapter.</param>
+    /// <param name="id">The target's id.</param>
+    public static bool IsVirtualTarget(LUID adapterId, uint id)
+    {
+        var name = TargetName(adapterId, id);
+
+        // The decision itself lives in VirtualDisplayIdentity, so that
+        // it can be tested without a virtual display driver.
+        return VirtualDisplayIdentity.IsVirtual(
+            name.monitorDevicePath,
+            name.monitorFriendlyDeviceName,
+            name.edidManufactureId,
+            name.edidProductCodeId);
+    }
+
+    /// <summary>
     /// The virtual display's path in the topology, if it is there.
     /// </summary>
     /// <param name="path">The path, when it is found.</param>
@@ -443,8 +546,7 @@ public static class DisplayConfigController
 
         foreach (var p in topology.Paths)
         {
-            if (!TargetPath(p.targetInfo.adapterId, p.targetInfo.id)
-                    .Contains(VirtualEdidFingerprint, StringComparison.OrdinalIgnoreCase))
+            if (!IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id))
                 continue;
 
             path = p;
@@ -488,8 +590,7 @@ public static class DisplayConfigController
             bool isActive = (p.flags & PATH_ACTIVE) != 0;
             if (!isActive) continue;
 
-            if (TargetPath(p.targetInfo.adapterId, p.targetInfo.id)
-                    .Contains(VirtualEdidFingerprint, StringComparison.OrdinalIgnoreCase))
+            if (IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id))
                 return true;
         }
 
@@ -516,17 +617,34 @@ public static class DisplayConfigController
     /// <returns>True when the display has an active path afterwards.</returns>
     public static bool Attach(int x, int y)
     {
+        // The paths that are on the desktop right now.
+        //
+        // THE ACTIVE QUERY IS THE BASE FOR BOTH THE PATHS AND THE
+        // MODES, and they have to come from the SAME query.
+        //
+        // A path's modeInfoIdx is an INDEX INTO THE MODE ARRAY of the
+        // query that produced it.  So a path array from one query and
+        // a mode array from another are only compatible by accident -
+        // and they stop being compatible exactly when Windows rebuilds
+        // the topology, which is when the indices change.
+        //
+        // The old code took the paths from the ACTIVE query and the
+        // modes from the DATABASE, so the surviving paths pointed at
+        // the WRONG modes, and SetDisplayConfig answered 87.
+        var active = QueryAny(QDC_ONLY_ACTIVE_PATHS, QDC_ALL_PATHS, QDC_DATABASE_CURRENT);
+        if (active is null) return false;
+
+        // The virtual display's path comes from the DATABASE, because
+        // while it is DETACHED it is not in the active set.
         var database = QueryAny(QDC_ALL_PATHS, QDC_DATABASE_CURRENT);
         if (database is null) return false;
 
         if (!TryFindVirtualPath(database, out var vpath, out var vSourceIdx, out var vTargetIdx))
             return false;
 
-        // The paths that are on the desktop right now.
-        var active = QueryAny(QDC_ONLY_ACTIVE_PATHS, QDC_DATABASE_CURRENT);
-        if (active is null) return false;
-
-        var modes = new List<DISPLAYCONFIG_MODE_INFO>(database.Modes);
+        // The modes that are on the desktop, carried over with their
+        // indices UNCHANGED - the paths keep referring to them.
+        var modes = new List<DISPLAYCONFIG_MODE_INFO>(active.Modes);
         var paths = new List<DISPLAYCONFIG_PATH_INFO>();
 
         foreach (var p in active.Paths)
@@ -535,29 +653,60 @@ public static class DisplayConfigController
             // path in the database must not be re-added to the
             // desktop by accident.
             if ((p.flags & PATH_ACTIVE) == 0) continue;
+
+            // A path that is already virtual is not carried over: it
+            // is re-added below, at the requested position.
+            if (IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id)) continue;
+
             paths.Add(p);
         }
 
-        uint newSourceIdx;
-        uint newTargetIdx;
+        // The virtual display's mode.
+        //
+        // The TARGET mode comes from the target's preferred mode, which
+        // carries the full VIDEO_SIGNAL_INFO.  The SOURCE mode is the
+        // same size in 32bpp, at the requested position.
+        //
+        // A display that has never been on the desktop has no recorded
+        // modes at all - its modeInfoIdx fields are 0xFFFFFFFF - so
+        // both modes are built from the preferred mode.  When it HAS
+        // been on the desktop, the recorded modes are reused, because
+        // they carry the target mode's exact video timings.
+        var preferred = new DISPLAYCONFIG_TARGET_PREFERRED_MODE
+        {
+            header = new DEVICE_INFO_HEADER
+            {
+                type = DEVICE_INFO_GET_TARGET_PREFERRED_MODE,
+                size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_PREFERRED_MODE>(),
+                adapterId = vpath.targetInfo.adapterId,
+                id = vpath.targetInfo.id
+            }
+        };
+        if (GetPreferredModeInfo(ref preferred) != 0) return false;
 
-        if (vSourceIdx < 0 || vTargetIdx < 0 ||
-            vpath.sourceInfo.modeInfoIdx == uint.MaxValue ||
-            vpath.targetInfo.modeInfoIdx == uint.MaxValue)
+        uint newTargetIdx;
+        uint newSourceIdx;
+
+        if (vSourceIdx >= 0 && vTargetIdx >= 0
+            && vpath.sourceInfo.modeInfoIdx != uint.MaxValue
+            && vpath.targetInfo.modeInfoIdx != uint.MaxValue
+            && vTargetIdx < database.Modes.Length
+            && vSourceIdx < database.Modes.Length)
+        {
+            // The recorded modes are reused, with the position
+            // overridden.
+            var sourceMode = database.Modes[vSourceIdx];
+            sourceMode.sourceMode.position = new POINTL { x = x, y = y };
+
+            newSourceIdx = (uint)modes.Count;
+            modes.Add(sourceMode);
+
+            newTargetIdx = (uint)modes.Count;
+            modes.Add(database.Modes[vTargetIdx]);
+        }
+        else
         {
             // No recorded modes - build them from the preferred mode.
-            var preferred = new DISPLAYCONFIG_TARGET_PREFERRED_MODE
-            {
-                header = new DEVICE_INFO_HEADER
-                {
-                    type = DEVICE_INFO_GET_TARGET_PREFERRED_MODE,
-                    size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_PREFERRED_MODE>(),
-                    adapterId = vpath.targetInfo.adapterId,
-                    id = vpath.targetInfo.id
-                }
-            };
-            if (GetPreferredModeInfo(ref preferred) != 0) return false;
-
             newTargetIdx = (uint)modes.Count;
             modes.Add(new DISPLAYCONFIG_MODE_INFO
             {
@@ -582,20 +731,6 @@ public static class DisplayConfigController
                 }
             });
         }
-        else
-        {
-            // The path's modes come from the database query, so they
-            // have to be carried over into the mode array that is sent
-            // back.
-            var sourceMode = database.Modes[vSourceIdx];
-            sourceMode.sourceMode.position = new POINTL { x = x, y = y };
-
-            newSourceIdx = (uint)modes.Count;
-            modes.Add(sourceMode);
-
-            newTargetIdx = (uint)modes.Count;
-            modes.Add(database.Modes[vTargetIdx]);
-        }
 
         var newPath = vpath;
         newPath.sourceInfo.modeInfoIdx = newSourceIdx;
@@ -618,22 +753,78 @@ public static class DisplayConfigController
     /// Unlike the legacy detach, this is REVERSIBLE: the adapter stays
     /// attached to the machine, so <see cref="Attach"/> can bring it
     /// back.
+    ///
+    /// WHY THE ACTIVE-PATHS QUERY IS NOT ENOUGH
+    /// ---------------------------------------
+    /// The user's report was that with three physical monitors the
+    /// detach worked, but with one or two the VDD stayed on the
+    /// desktop in Extended mode, usually repositioned above the other
+    /// displays.
+    ///
+    /// The cause is NOT that the VDD is found by its position - the
+    /// fingerprint was always a hardware one.  The cause is that the
+    /// ACTIVE-path query does not necessarily return a usable set of
+    /// paths once Windows has re-laid-out the desktop.
+    ///
+    /// Specifically: when the physical monitors change, Windows
+    /// rebuilds the source modes of the surviving paths, and the
+    /// resulting positions can leave the desktop in a state where the
+    /// supplied configuration - which carries those positions back
+    /// unchanged - is not one Windows will accept.  SetDisplayConfig
+    /// then answers 87 (ERROR_INVALID_PARAMETER) and the detach
+    /// silently does nothing.
+    ///
+    /// So the detach is now built to be ROBUST rather than merely
+    /// correct:
+    ///
+    ///   * the virtual display is found by hardware identity, through
+    ///     <see cref="IsVirtualTarget"/>, so a topology change cannot
+    ///     make it invisible;
+    ///   * the surviving paths' source modes are RE-COMPUTED so that
+    ///     the remaining displays are packed left-to-right from the
+    ///     origin, which is the arrangement Windows always accepts;
+    ///   * and if that still fails, the detach falls back to removing
+    ///     the virtual path while leaving the other paths' positions
+    ///     exactly as they are.
+    ///
+    /// The positions matter because Windows forbids overlapping
+    /// monitor rectangles outright.  A topology change can leave two
+    /// survivors overlapping, and then NO configuration that keeps them
+    /// where they are can be valid.
     /// </remarks>
     /// <returns>True when the path was removed.</returns>
     public static bool Detach()
     {
-        var active = QueryAny(QDC_ONLY_ACTIVE_PATHS, QDC_DATABASE_CURRENT);
-        if (active is null) return false;
+        // The ACTIVE paths are the ones on the desktop.  The query is
+        // retried with the database if the active query fails, because
+        // a machine that has just had a monitor unplugged can answer
+        // the active query with an error for a moment.
+        var active = QueryAny(QDC_ONLY_ACTIVE_PATHS, QDC_ALL_PATHS, QDC_DATABASE_CURRENT);
+        if (active is null)
+        {
+            Log("Detach: the display topology could not be queried at all.");
+            return false;
+        }
 
         var kept = new List<DISPLAYCONFIG_PATH_INFO>();
+        var keptModes = new List<DISPLAYCONFIG_MODE_INFO>();
         bool removed = false;
+
+        // The modes the surviving paths refer to have to be carried
+        // over, because the paths' modeInfoIdx fields are INDICES INTO
+        // THE MODE ARRAY.  Sending a path array with a mode array that
+        // does not contain those modes - or contains them at different
+        // indices - is exactly the kind of thing Windows answers 87.
+        //
+        // This is the bug that the topology change exposed: the old
+        // code sent the whole mode array back unchanged, so it
+        // happened to work when the indices lined up, and the indices
+        // stop lining up when Windows rebuilds the topology.
+        var modeIndex = new Dictionary<(uint, uint, uint), uint>();
 
         foreach (var p in active.Paths)
         {
-            bool isVirtual = TargetPath(p.targetInfo.adapterId, p.targetInfo.id)
-                .Contains(VirtualEdidFingerprint, StringComparison.OrdinalIgnoreCase);
-
-            if (isVirtual)
+            if (IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id))
             {
                 removed = true;
                 continue;
@@ -643,13 +834,206 @@ public static class DisplayConfigController
             kept.Add(p);
         }
 
-        if (!removed) return false;
+        if (!removed)
+        {
+            Log("Detach: no active virtual display path was found in the topology.");
+            return false;
+        }
 
-        // The mode array is sent back unchanged: the paths that are
-        // being kept still refer to the modes at the same indices.
-        var modes = new List<DISPLAYCONFIG_MODE_INFO>(active.Modes);
-        if (!Apply(kept, modes)) return false;
-        return !IsVirtualActive();
+        // Rebuild the mode array so that it contains exactly the modes
+        // the surviving paths refer to, and remap their indices.
+        //
+        // THE ORDER OF THE MODE ARRAY MATTERS.
+        //
+        // Windows returns the modes interleaved - target, source,
+        // target, source - and it expects them back in that shape.  A
+        // mode array that has been rebuilt in a different order - all
+        // the sources first, say - is rejected with 87
+        // (ERROR_INVALID_PARAMETER), even though it contains exactly
+        // the right modes.
+        //
+        // So the mode array is rebuilt by WALKING THE ORIGINAL ARRAY
+        // IN ORDER and keeping only the modes the surviving paths
+        // refer to.  That preserves both the relative order and the
+        // target-before-source pairing that Windows expects.
+        var wanted = new HashSet<uint>();
+        foreach (var p in kept)
+        {
+            if (p.sourceInfo.modeInfoIdx != uint.MaxValue) wanted.Add(p.sourceInfo.modeInfoIdx);
+            if (p.targetInfo.modeInfoIdx != uint.MaxValue) wanted.Add(p.targetInfo.modeInfoIdx);
+        }
+
+        var remap = new Dictionary<uint, uint>();
+        var modes = new List<DISPLAYCONFIG_MODE_INFO>();
+
+        for (int m = 0; m < active.Modes.Length; m++)
+        {
+            if (!wanted.Contains((uint)m)) continue;
+            remap[(uint)m] = (uint)modes.Count;
+            modes.Add(active.Modes[m]);
+        }
+
+        for (int i = 0; i < kept.Count; i++)
+        {
+            var p = kept[i];
+            if (p.sourceInfo.modeInfoIdx != uint.MaxValue
+                && remap.TryGetValue(p.sourceInfo.modeInfoIdx, out var sIdx))
+                p.sourceInfo.modeInfoIdx = sIdx;
+            if (p.targetInfo.modeInfoIdx != uint.MaxValue
+                && remap.TryGetValue(p.targetInfo.modeInfoIdx, out var tIdx))
+                p.targetInfo.modeInfoIdx = tIdx;
+            kept[i] = p;
+        }
+
+        // THE TWO VIEWS OF THE TOPOLOGY DISAGREE, AND THAT IS THE
+        // WHOLE PROBLEM.
+        //
+        // On this machine, right now:
+        //
+        //   QDC_ONLY_ACTIVE_PATHS says the artist display is at
+        //   (0,0) and the laptop panel at (1920,0).
+        //
+        //   QDC_DATABASE_CURRENT says the artist display is at
+        //   (1920,0) and the laptop panel at (0,0).
+        //
+        // Same paths, same targets, opposite positions.  The database
+        // is the one Windows will apply, so the DETACH has to send
+        // the DATABASE's positions - not the active query's.
+        //
+        // The old code sent the ACTIVE query's mode array, whose
+        // positions were the ones Windows had already refused, so every
+        // SetDisplayConfig call answered 87 (ERROR_INVALID_PARAMETER)
+        // and the detach silently did nothing.  That is the user's
+        // bug: the virtual display stayed on the desktop, in Extended
+        // mode, wherever Windows had put it.
+        var database = QueryAny(QDC_DATABASE_CURRENT, QDC_ALL_PATHS);
+        var positionSource = database ?? active;
+
+        // FIRST ATTEMPT: the survivors keep the positions the DATABASE
+        // records for them.
+        //
+        // The mode array has to describe the positions as well as the
+        // sizes, because SetDisplayConfig reads the position out of
+        // the SOURCE MODE, not out of the path.
+        for (int i = 0; i < kept.Count; i++)
+        {
+            var p = kept[i];
+            var (x, y) = SourcePosition(positionSource.Modes, p);
+            SetSourcePosition(modes, p, x, y);
+        }
+
+        if (Apply(kept, modes)) return !IsVirtualActive();
+
+        // SECOND ATTEMPT: pack the survivors from the origin, so that
+        // no two of them overlap.
+        //
+        // Windows forbids overlapping monitor rectangles outright, and
+        // a topology change can leave two survivors overlapping -
+        // which is exactly what happens when the user unplugs a
+        // monitor and Windows re-lays-out the rest.  No configuration
+        // that keeps them where they are can be valid, so the
+        // positions have to be rebuilt.
+        //
+        // The survivors are laid out left to right from the origin.
+        // The VIRTUAL display's slot is given up and NOT reused: the
+        // user asked for the virtual display to be gone, and a
+        // leftover gap on the left is the price of that.
+        var packedModes = new List<DISPLAYCONFIG_MODE_INFO>(modes);
+
+        int cursorX = 0;
+        foreach (var p in kept)
+        {
+            var (w, _) = SourceSize(positionSource.Modes, p);
+            SetSourcePosition(packedModes, p, cursorX, 0);
+            cursorX += w;
+        }
+
+        Log("Detach: the first attempt was refused; retrying with the survivors packed "
+            + "from the origin.");
+        if (Apply(kept, packedModes)) return !IsVirtualActive();
+
+        // THIRD ATTEMPT: the packed layout, with the paths REBUILT.
+        //
+        // A path that Windows itself marked as having no available
+        // target, or whose status flags say it is not in use, can
+        // make the whole configuration invalid even when its mode is
+        // fine.  Clearing those flags and marking the targets as
+        // available is what the ATTACH does for the virtual display's
+        // path, and it is what makes the difference here.
+        var rebuilt = new List<DISPLAYCONFIG_PATH_INFO>(kept.Count);
+        for (int i = 0; i < kept.Count; i++)
+        {
+            var p = kept[i];
+            p.sourceInfo.statusFlags = 0;
+            p.targetInfo.targetAvailable = 1;
+            p.targetInfo.statusFlags = 0;
+            p.flags = PATH_ACTIVE;
+            rebuilt.Add(p);
+        }
+
+        Log("Detach: the packed attempt was refused; retrying with rebuilt paths.");
+        if (Apply(rebuilt, packedModes)) return !IsVirtualActive();
+
+        return false;
+    }
+
+    /// <summary>
+    /// Write a position into a path's source mode.
+    /// </summary>
+    /// <remarks>
+    /// The mode array is a list of STRUCTS, so an element cannot be
+    /// modified in place - it has to be read, changed, and written
+    /// back.
+    /// </remarks>
+    private static void SetSourcePosition(
+        List<DISPLAYCONFIG_MODE_INFO> modes,
+        DISPLAYCONFIG_PATH_INFO path, int x, int y)
+    {
+        for (int m = 0; m < modes.Count; m++)
+        {
+            var mode = modes[m];
+            if (mode.infoType != MODE_INFO_TYPE_SOURCE) continue;
+            if (!mode.adapterId.SameAs(path.sourceInfo.adapterId)) continue;
+            if (mode.id != path.sourceInfo.id) continue;
+
+            mode.sourceMode.position = new POINTL { x = x, y = y };
+            modes[m] = mode;
+            return;
+        }
+    }
+
+    /// <summary>
+    /// A path's source mode position, read out of the mode array.
+    /// </summary>
+    private static (int X, int Y) SourcePosition(
+        DISPLAYCONFIG_MODE_INFO[] modes, DISPLAYCONFIG_PATH_INFO path)
+    {
+        if (path.sourceInfo.modeInfoIdx != uint.MaxValue
+            && path.sourceInfo.modeInfoIdx < modes.Length)
+        {
+            var m = modes[path.sourceInfo.modeInfoIdx];
+            if (m.infoType == MODE_INFO_TYPE_SOURCE)
+                return (m.sourceMode.position.x, m.sourceMode.position.y);
+        }
+
+        return (0, 0);
+    }
+
+    /// <summary>
+    /// A path's source mode size, read out of the mode array.
+    /// </summary>
+    private static (int Width, int Height) SourceSize(
+        DISPLAYCONFIG_MODE_INFO[] modes, DISPLAYCONFIG_PATH_INFO path)
+    {
+        if (path.sourceInfo.modeInfoIdx != uint.MaxValue
+            && path.sourceInfo.modeInfoIdx < modes.Length)
+        {
+            var m = modes[path.sourceInfo.modeInfoIdx];
+            if (m.infoType == MODE_INFO_TYPE_SOURCE)
+                return ((int)m.sourceMode.Width, (int)m.sourceMode.Height);
+        }
+
+        return (1920, 1080);
     }
 
     // -----------------------------------------------------------------
@@ -671,20 +1055,35 @@ public static class DisplayConfigController
         var pathArray = paths.ToArray();
         var modeArray = modes.ToArray();
 
+        var attempts = new System.Text.StringBuilder();
+
         foreach (var flags in ApplyFlagSets)
         {
             var validate = SetDisplayConfig(
                 (uint)pathArray.Length, pathArray,
                 (uint)modeArray.Length, modeArray,
                 flags & ~SDC_APPLY | SDC_VALIDATE);
-            if (validate != 0) continue;
 
-            return SetDisplayConfig(
+            attempts.Append($"  validate[0x{flags:X}] = {validate}");
+            if (validate != 0)
+            {
+                attempts.AppendLine();
+                continue;
+            }
+
+            var apply = SetDisplayConfig(
                 (uint)pathArray.Length, pathArray,
                 (uint)modeArray.Length, modeArray,
-                flags) == 0;
+                flags);
+
+            attempts.AppendLine();
+            attempts.Append($"  apply[0x{flags:X}] = {apply}");
+
+            Log($"SetDisplayConfig with {pathArray.Length} path(s):\n{attempts}");
+            return apply == 0;
         }
 
+        Log($"SetDisplayConfig with {pathArray.Length} path(s):\n{attempts}");
         return false;
     }
 
@@ -704,8 +1103,7 @@ public static class DisplayConfigController
 
         foreach (var p in topology.Paths)
         {
-            if (!TargetPath(p.targetInfo.adapterId, p.targetInfo.id)
-                    .Contains(VirtualEdidFingerprint, StringComparison.OrdinalIgnoreCase))
+            if (!IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id))
                 continue;
 
             path = p;
