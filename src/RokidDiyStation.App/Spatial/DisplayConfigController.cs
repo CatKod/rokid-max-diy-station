@@ -23,29 +23,69 @@
 // CCD also needs no administrator rights, which is what makes
 // "open the spatial display" a plain user action.
 //
-// THE CONSTANTS AND THE STRUCT LAYOUT ARE EXACT
-// ---------------------------------------------
-// Every number and every field order in this file is taken from the
-// Windows SDK's wingdi.h, and the layout was verified against the
-// running system - see tools/ProbeCcdTruth.
+// THE BINDINGS WERE WRONG - AND THAT WAS THE WHOLE BUG
+// -----------------------------------------------------
+// This file used to declare the three CCD functions with signatures
+// that do not exist.  Read from the Windows SDK (10.0.26100.0,
+// um/WinUser.h), they are:
 //
-// The first version of this file got the flags and several structs
-// WRONG, and the failure looked like a broken machine rather than a
-// broken binding:
+//   LONG GetDisplayConfigBufferSizes(
+//       _In_  UINT32 flags,
+//       _Out_ UINT32* numPathArrayElements,
+//       _Out_ UINT32* numModeInfoArrayElements);
 //
-//   flag                 was      SDK
-//   QDC_ALL_PATHS        -        0x00000001
-//   QDC_ONLY_ACTIVE      0x04     0x00000002
-//   QDC_DATABASE_CURRENT 0x01     0x00000004
+//   LONG SetDisplayConfig(
+//       _In_ UINT32 numPathArrayElements,
+//       _In_ DISPLAYCONFIG_PATH_INFO* pathArray,
+//       _In_ UINT32 numModeInfoArrayElements,
+//       _In_ DISPLAYCONFIG_MODE_INFO* modeInfoArray,
+//       _In_ UINT32 flags);
 //
-// The app's "QDC_DATABASE_CURRENT" was really QDC_ALL_PATHS, and its
-// "QDC_ONLY_ACTIVE_PATHS" was really QDC_DATABASE_CURRENT - the two
-// were swapped.  QueryDisplayConfig then failed with
-// ERROR_INVALID_PARAMETER (87) for every call, so the app concluded
-// the topology was unreadable and the virtual display could never be
-// found.
+//   LONG QueryDisplayConfig(
+//       _In_    UINT32 flags,
+//       _Inout_ UINT32* numPathArrayElements,
+//       _Out_   DISPLAYCONFIG_PATH_INFO* pathArray,
+//       _Inout_ UINT32* numModeInfoArrayElements,
+//       _Out_   DISPLAYCONFIG_MODE_INFO* modeInfoArray,
+//       _Inout_ DISPLAYCONFIG_TOPOLOGY_ID* currentTopologyId);
 //
-// Two struct layouts were wrong as well:
+// What this file used to declare:
+//
+//   GetDisplayConfigBufferSizes(flags, *path, *mode, *target, *source)
+//   QueryDisplayConfig(flags, *path, paths, *mode, modes, *target,
+//                      targets, *source, sources)
+//   SetDisplayConfig(flags, paths, pathCount, modes, modeCount)
+//
+// There are NO target-name or source-name arrays in QueryDisplayConfig.
+// The names come from DisplayConfigGetDeviceInfo, one target at a
+// time.  And SetDisplayConfig takes the FLAGS LAST.
+//
+// The failure looked like a broken machine rather than a broken
+// binding:
+//
+//   * QueryDisplayConfig answered 87 (ERROR_INVALID_PARAMETER) for
+//     QDC_ALL_PATHS and QDC_ONLY_ACTIVE_PATHS, and worked for
+//     QDC_DATABASE_CURRENT - a difference that had nothing to do with
+//     the flags;
+//   * SetDisplayConfig answered 87 for a topology that was already
+//     valid, and sometimes crashed with an AccessViolationException;
+//   * and the virtual display could never be found.
+//
+// The reason for the 87 is in the SDK's own annotation of the last
+// QueryDisplayConfig parameter:
+//
+//   _When_(!(flags & QDC_DATABASE_CURRENT), _Pre_null_)
+//   _When_(flags & QDC_DATABASE_CURRENT, _Out_)
+//       DISPLAYCONFIG_TOPOLOGY_ID* currentTopologyId);
+//
+// The old binding passed a POINTER where NULL was required, so the
+// API rejected every query that did not want a topology id - which is
+// every query except the one that was least useful.  With the
+// topology id passed as NULL, QDC_ALL_PATHS works and returns the
+// database's 57 paths, among them the virtual display's INACTIVE path.
+//
+// The other two struct fixes are still in place, because they were
+// wrong too:
 //
 //   * DISPLAYCONFIG_PATH_SOURCE_INFO is
 //     { adapterId, id, union{modeInfoIdx}, statusFlags }.  The mode
@@ -61,6 +101,13 @@
 // The struct sizes are asserted by the unit tests, because a silent
 // layout drift here produces an empty device path rather than an
 // exception.
+//
+// THE FLAGS THAT ARE ACCEPTED
+// ---------------------------
+// SDC_ALLOW_PATH_ORDER_CHANGES is REJECTED with 87 when a path is
+// being added that was not in the previous topology - which is
+// exactly what the attach does.  The flag sets are therefore tried in
+// turn, and the one that validates is the one that is applied.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -74,8 +121,7 @@ namespace RokidDiyStation.App.Spatial;
 public static class DisplayConfigController
 {
     // -----------------------------------------------------------------
-    // The query flags - wingdi.h, GetDisplayConfigBufferSizes and
-    // QueryDisplayConfig.
+    // The query flags - wingdi.h.
     // -----------------------------------------------------------------
 
     /// <summary>Every path in the database, active or not.</summary>
@@ -115,17 +161,26 @@ public static class DisplayConfigController
     private const uint SDC_ALLOW_PATH_ORDER_CHANGES = 0x00002000;
 
     /// <summary>
-    /// The flags used to apply a configuration.
+    /// The flag sets the apply is tried with, in order.
     /// </summary>
     /// <remarks>
-    /// SDC_SAVE_TO_DATABASE is deliberately NOT set.  Without it the
+    /// The first set - the one with SDC_ALLOW_PATH_ORDER_CHANGES - is
+    /// rejected with 87 when a path is added that was not in the
+    /// previous topology.  The set that VALIDATES is the set that is
+    /// applied, so the two can never disagree.
+    ///
+    /// SDC_SAVE_TO_DATABASE is deliberately NOT used.  Without it the
     /// new arrangement lives only in the session, which is what makes
-    /// the detach reversible and keeps it out of the user's display
-    /// settings.
+    /// the detach reversible and keeps the virtual display out of the
+    /// user's display settings.
     /// </remarks>
-    private const uint ApplyFlags =
-        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG |
-        SDC_ALLOW_CHANGES | SDC_ALLOW_PATH_ORDER_CHANGES;
+    private static readonly uint[] ApplyFlagSets =
+    {
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_ALLOW_PATH_ORDER_CHANGES,
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG,
+        SDC_APPLY,
+    };
 
     // -----------------------------------------------------------------
     // The mode and device-info constants - wingdi.h.
@@ -134,12 +189,10 @@ public static class DisplayConfigController
     private const uint MODE_INFO_TYPE_SOURCE = 1;
     private const uint MODE_INFO_TYPE_TARGET = 2;
 
-    private const uint DEVICE_INFO_GET_SOURCE_NAME = 1;
     private const uint DEVICE_INFO_GET_TARGET_NAME = 2;
     private const uint DEVICE_INFO_GET_TARGET_PREFERRED_MODE = 3;
 
     private const uint PIXELFORMAT_32BPP = 4;
-    private const uint ROTATION_IDENTITY = 1;
 
     /// <summary>DISPLAYCONFIG_PATH_ACTIVE.</summary>
     private const uint PATH_ACTIVE = 0x00000001;
@@ -148,34 +201,12 @@ public static class DisplayConfigController
     private const string VirtualEdidFingerprint = "MTT1337";
 
     // -----------------------------------------------------------------
-    // Capacities
-    // -----------------------------------------------------------------
-
-    /// <summary>
-    /// How much room the path and mode arrays are given.
-    /// </summary>
-    /// <remarks>
-    /// GetDisplayConfigBufferSizes reports the target and source name
-    /// counts as ZERO on this machine, and a zero-sized (or NULL) name
-    /// array makes the whole query fail with ERROR_INVALID_PARAMETER.
-    /// The API treats the size as a CAPACITY and writes back the count
-    /// it actually used, so over-reserving is both safe and necessary.
-    /// </remarks>
-    private const int PathCapacity = 64;
-
-    /// <summary>How much room the mode array is given.</summary>
-    private const int ModeCapacity = 256;
-
-    /// <summary>How much room the name arrays are given.</summary>
-    private const int NameCapacity = 128;
-
-    // -----------------------------------------------------------------
-    // The API
+    // The API - with the SDK's signatures, exactly.
     // -----------------------------------------------------------------
 
     [DllImport("user32.dll")]
     private static extern int GetDisplayConfigBufferSizes(
-        uint flags, out uint pathCount, out uint modeCount, out uint targetCount, out uint sourceCount);
+        uint flags, out uint pathCount, out uint modeCount);
 
     [DllImport("user32.dll", EntryPoint = "QueryDisplayConfig")]
     private static extern int QueryDisplayConfig(
@@ -184,18 +215,24 @@ public static class DisplayConfigController
         [Out] DISPLAYCONFIG_PATH_INFO[] pathInfoArray,
         ref uint modeInfoArraySize,
         [Out] DISPLAYCONFIG_MODE_INFO[] modeInfoArray,
-        ref uint targetInfoArraySize,
-        [Out] DISPLAYCONFIG_TARGET_DEVICE_NAME[] targetInfoArray,
-        ref uint sourceInfoArraySize,
-        [Out] DISPLAYCONFIG_SOURCE_DEVICE_NAME[] sourceInfoArray);
+        IntPtr currentTopologyId);
+
+    [DllImport("user32.dll", EntryPoint = "QueryDisplayConfig")]
+    private static extern int QueryDisplayConfigWithTopology(
+        uint flags,
+        ref uint pathInfoArraySize,
+        [Out] DISPLAYCONFIG_PATH_INFO[] pathInfoArray,
+        ref uint modeInfoArraySize,
+        [Out] DISPLAYCONFIG_MODE_INFO[] modeInfoArray,
+        ref uint currentTopologyId);
 
     [DllImport("user32.dll", EntryPoint = "SetDisplayConfig")]
     private static extern int SetDisplayConfig(
-        uint flags,
-        [In] DISPLAYCONFIG_PATH_INFO[] pathInfoArray,
         uint pathInfoArraySize,
+        [In] DISPLAYCONFIG_PATH_INFO[] pathInfoArray,
+        uint modeInfoArraySize,
         [In] DISPLAYCONFIG_MODE_INFO[] modeInfoArray,
-        uint modeInfoArraySize);
+        uint flags);
 
     [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
     private static extern int GetTargetDeviceInfo(ref DISPLAYCONFIG_TARGET_DEVICE_NAME request);
@@ -356,13 +393,6 @@ public static class DisplayConfigController
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string monitorDevicePath;
     }
 
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    public struct DISPLAYCONFIG_SOURCE_DEVICE_NAME
-    {
-        public DEVICE_INFO_HEADER header;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string viewGdiDeviceName;
-    }
-
     /// <summary>
     /// The preferred mode of a target.
     /// </summary>
@@ -390,7 +420,7 @@ public static class DisplayConfigController
     /// topology at all.
     /// </summary>
     public static bool IsAvailable()
-        => QueryAny(QDC_DATABASE_CURRENT, QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS) is not null;
+        => QueryAny(QDC_ALL_PATHS, QDC_ONLY_ACTIVE_PATHS, QDC_DATABASE_CURRENT) is not null;
 
     /// <summary>
     /// The virtual display's path in the topology, if it is there.
@@ -408,10 +438,7 @@ public static class DisplayConfigController
 
         // The virtual display's path has to be found in the DATABASE,
         // because while it is DETACHED it is not in the active set.
-        // The flags are tried in turn, because on this machine only
-        // QDC_DATABASE_CURRENT is accepted and the other two answer
-        // ERROR_INVALID_PARAMETER (87).
-        var topology = QueryAny(QDC_DATABASE_CURRENT, QDC_ALL_PATHS);
+        var topology = QueryAny(QDC_ALL_PATHS, QDC_DATABASE_CURRENT);
         if (topology is null) return false;
 
         foreach (var p in topology.Paths)
@@ -449,7 +476,7 @@ public static class DisplayConfigController
     /// </summary>
     public static bool IsVirtualActive()
     {
-        var topology = QueryAny(QDC_DATABASE_CURRENT, QDC_ONLY_ACTIVE_PATHS);
+        var topology = QueryAny(QDC_ONLY_ACTIVE_PATHS, QDC_ALL_PATHS);
         if (topology is null) return false;
 
         foreach (var p in topology.Paths)
@@ -474,29 +501,32 @@ public static class DisplayConfigController
     /// </summary>
     /// <remarks>
     /// The virtual display's path is taken from the DATABASE - that is
-    /// where it lives while it is detached - together with the source
-    /// and target modes the OS recorded for it.  The active paths are
-    /// then sent back with that path added, so the adapter is never
-    /// torn down and the operation is reversible.
+    /// where it lives while it is detached - and its modes are BUILT,
+    /// because Windows has never recorded any: a display that has
+    /// never been on the desktop has no source or target mode, and its
+    /// modeInfoIdx fields are 0xFFFFFFFF.
+    ///
+    /// The target mode comes from the target's preferred mode, which
+    /// carries the full VIDEO_SIGNAL_INFO.  The source mode is the
+    /// same size in 32bpp, at the requested position.
+    ///
+    /// The active paths are then sent back with that path added, so the
+    /// adapter is never torn down and the operation is reversible.
     /// </remarks>
     /// <returns>True when the display has an active path afterwards.</returns>
     public static bool Attach(int x, int y)
     {
-        var database = QueryAny(QDC_DATABASE_CURRENT, QDC_ALL_PATHS);
+        var database = QueryAny(QDC_ALL_PATHS, QDC_DATABASE_CURRENT);
         if (database is null) return false;
 
         if (!TryFindVirtualPath(database, out var vpath, out var vSourceIdx, out var vTargetIdx))
             return false;
 
-        // The paths that are on the desktop right now.  The flag that
-        // returns them is tried in turn, because on this machine only
-        // QDC_DATABASE_CURRENT is accepted.
-        var active = QueryAny(QDC_DATABASE_CURRENT, QDC_ONLY_ACTIVE_PATHS);
+        // The paths that are on the desktop right now.
+        var active = QueryAny(QDC_ONLY_ACTIVE_PATHS, QDC_DATABASE_CURRENT);
         if (active is null) return false;
 
-        // The path's modes come from the database query, so they have
-        // to be carried over into the mode array that is sent back.
-        var modes = new List<DISPLAYCONFIG_MODE_INFO>(active.Modes);
+        var modes = new List<DISPLAYCONFIG_MODE_INFO>(database.Modes);
         var paths = new List<DISPLAYCONFIG_PATH_INFO>();
 
         foreach (var p in active.Paths)
@@ -508,16 +538,64 @@ public static class DisplayConfigController
             paths.Add(p);
         }
 
-        if (vSourceIdx < 0 || vTargetIdx < 0) return false;
+        uint newSourceIdx;
+        uint newTargetIdx;
 
-        var sourceMode = database.Modes[vSourceIdx];
-        sourceMode.sourceMode.position = new POINTL { x = x, y = y };
+        if (vSourceIdx < 0 || vTargetIdx < 0 ||
+            vpath.sourceInfo.modeInfoIdx == uint.MaxValue ||
+            vpath.targetInfo.modeInfoIdx == uint.MaxValue)
+        {
+            // No recorded modes - build them from the preferred mode.
+            var preferred = new DISPLAYCONFIG_TARGET_PREFERRED_MODE
+            {
+                header = new DEVICE_INFO_HEADER
+                {
+                    type = DEVICE_INFO_GET_TARGET_PREFERRED_MODE,
+                    size = (uint)Marshal.SizeOf<DISPLAYCONFIG_TARGET_PREFERRED_MODE>(),
+                    adapterId = vpath.targetInfo.adapterId,
+                    id = vpath.targetInfo.id
+                }
+            };
+            if (GetPreferredModeInfo(ref preferred) != 0) return false;
 
-        var newSourceIdx = (uint)modes.Count;
-        modes.Add(sourceMode);
+            newTargetIdx = (uint)modes.Count;
+            modes.Add(new DISPLAYCONFIG_MODE_INFO
+            {
+                infoType = MODE_INFO_TYPE_TARGET,
+                id = vpath.targetInfo.id,
+                adapterId = vpath.targetInfo.adapterId,
+                targetMode = preferred.targetMode
+            });
 
-        var newTargetIdx = (uint)modes.Count;
-        modes.Add(database.Modes[vTargetIdx]);
+            newSourceIdx = (uint)modes.Count;
+            modes.Add(new DISPLAYCONFIG_MODE_INFO
+            {
+                infoType = MODE_INFO_TYPE_SOURCE,
+                id = vpath.sourceInfo.id,
+                adapterId = vpath.sourceInfo.adapterId,
+                sourceMode = new SOURCE_MODE
+                {
+                    Width = preferred.width,
+                    Height = preferred.height,
+                    PixelFormat = PIXELFORMAT_32BPP,
+                    position = new POINTL { x = x, y = y }
+                }
+            });
+        }
+        else
+        {
+            // The path's modes come from the database query, so they
+            // have to be carried over into the mode array that is sent
+            // back.
+            var sourceMode = database.Modes[vSourceIdx];
+            sourceMode.sourceMode.position = new POINTL { x = x, y = y };
+
+            newSourceIdx = (uint)modes.Count;
+            modes.Add(sourceMode);
+
+            newTargetIdx = (uint)modes.Count;
+            modes.Add(database.Modes[vTargetIdx]);
+        }
 
         var newPath = vpath;
         newPath.sourceInfo.modeInfoIdx = newSourceIdx;
@@ -544,11 +622,10 @@ public static class DisplayConfigController
     /// <returns>True when the path was removed.</returns>
     public static bool Detach()
     {
-        var active = QueryAny(QDC_DATABASE_CURRENT, QDC_ONLY_ACTIVE_PATHS);
+        var active = QueryAny(QDC_ONLY_ACTIVE_PATHS, QDC_DATABASE_CURRENT);
         if (active is null) return false;
 
         var kept = new List<DISPLAYCONFIG_PATH_INFO>();
-        var modes = new List<DISPLAYCONFIG_MODE_INFO>();
         bool removed = false;
 
         foreach (var p in active.Paths)
@@ -570,7 +647,7 @@ public static class DisplayConfigController
 
         // The mode array is sent back unchanged: the paths that are
         // being kept still refer to the modes at the same indices.
-        modes.AddRange(active.Modes);
+        var modes = new List<DISPLAYCONFIG_MODE_INFO>(active.Modes);
         if (!Apply(kept, modes)) return false;
         return !IsVirtualActive();
     }
@@ -583,9 +660,10 @@ public static class DisplayConfigController
     /// Send a configuration to Windows.
     /// </summary>
     /// <remarks>
-    /// The configuration is validated first, with SDC_VALIDATE, so a
-    /// configuration the OS rejects is never applied - and the
-    /// desktop is never left half-changed.
+    /// The flag sets are tried in turn.  Each set is validated first,
+    /// with SDC_VALIDATE, and the set that validates is the set that
+    /// is applied - so a configuration the OS rejects is never
+    /// applied, and the desktop is never left half-changed.
     /// </remarks>
     private static bool Apply(
         List<DISPLAYCONFIG_PATH_INFO> paths, List<DISPLAYCONFIG_MODE_INFO> modes)
@@ -593,16 +671,21 @@ public static class DisplayConfigController
         var pathArray = paths.ToArray();
         var modeArray = modes.ToArray();
 
-        var validate = SetDisplayConfig(
-            SDC_VALIDATE | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_ALLOW_PATH_ORDER_CHANGES,
-            pathArray, (uint)pathArray.Length,
-            modeArray, (uint)modeArray.Length);
-        if (validate != 0) return false;
+        foreach (var flags in ApplyFlagSets)
+        {
+            var validate = SetDisplayConfig(
+                (uint)pathArray.Length, pathArray,
+                (uint)modeArray.Length, modeArray,
+                flags & ~SDC_APPLY | SDC_VALIDATE);
+            if (validate != 0) continue;
 
-        return SetDisplayConfig(
-            ApplyFlags,
-            pathArray, (uint)pathArray.Length,
-            modeArray, (uint)modeArray.Length) == 0;
+            return SetDisplayConfig(
+                (uint)pathArray.Length, pathArray,
+                (uint)modeArray.Length, modeArray,
+                flags) == 0;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -651,64 +734,50 @@ public static class DisplayConfigController
     {
         public DISPLAYCONFIG_PATH_INFO[] Paths = Array.Empty<DISPLAYCONFIG_PATH_INFO>();
         public DISPLAYCONFIG_MODE_INFO[] Modes = Array.Empty<DISPLAYCONFIG_MODE_INFO>();
-        public DISPLAYCONFIG_TARGET_DEVICE_NAME[] Targets = Array.Empty<DISPLAYCONFIG_TARGET_DEVICE_NAME>();
-        public DISPLAYCONFIG_SOURCE_DEVICE_NAME[] Sources = Array.Empty<DISPLAYCONFIG_SOURCE_DEVICE_NAME>();
     }
 
+    /// <summary>
+    /// Query the display topology.
+    /// </summary>
+    /// <remarks>
+    /// The currentTopologyId parameter is NULL unless
+    /// QDC_DATABASE_CURRENT is set - the SDK requires it, and passing
+    /// a pointer where NULL is required is what made every other
+    /// query answer 87.
+    /// </remarks>
     private static Topology? Query(uint flags)
     {
-        // The size call's return code is IGNORED on purpose: the counts
-        // it reports for the name arrays are zero on this machine, and
-        // a zero-sized name array makes the whole query fail.  The
-        // capacities are fixed constants instead.
-        GetDisplayConfigBufferSizes(flags, out var pathCount, out var modeCount,
-            out var targetCount, out var sourceCount);
-
-        var topology = new Topology
-        {
-            Paths = new DISPLAYCONFIG_PATH_INFO[Math.Max(pathCount, PathCapacity)],
-            Modes = new DISPLAYCONFIG_MODE_INFO[Math.Max(modeCount, ModeCapacity)],
-            Targets = new DISPLAYCONFIG_TARGET_DEVICE_NAME[Math.Max(targetCount, NameCapacity)],
-            Sources = new DISPLAYCONFIG_SOURCE_DEVICE_NAME[Math.Max(sourceCount, NameCapacity)],
-        };
-
-        pathCount = (uint)topology.Paths.Length;
-        modeCount = (uint)topology.Modes.Length;
-        targetCount = (uint)topology.Targets.Length;
-        sourceCount = (uint)topology.Sources.Length;
-
-        var rc = QueryDisplayConfig(
-            flags,
-            ref pathCount, topology.Paths,
-            ref modeCount, topology.Modes,
-            ref targetCount, topology.Targets,
-            ref sourceCount, topology.Sources);
-
+        var rc = GetDisplayConfigBufferSizes(flags, out var pathCount, out var modeCount);
         if (rc != 0) return null;
 
-        Array.Resize(ref topology.Paths, (int)pathCount);
-        Array.Resize(ref topology.Modes, (int)modeCount);
-        Array.Resize(ref topology.Targets, (int)targetCount);
-        Array.Resize(ref topology.Sources, (int)sourceCount);
-        return topology;
+        if (pathCount == 0 || modeCount == 0) return null;
+
+        var paths = new DISPLAYCONFIG_PATH_INFO[pathCount];
+        var modes = new DISPLAYCONFIG_MODE_INFO[modeCount];
+
+        int result;
+        if ((flags & QDC_DATABASE_CURRENT) != 0)
+        {
+            uint topologyId = 0;
+            result = QueryDisplayConfigWithTopology(
+                flags, ref pathCount, paths, ref modeCount, modes, ref topologyId);
+        }
+        else
+        {
+            result = QueryDisplayConfig(
+                flags, ref pathCount, paths, ref modeCount, modes, IntPtr.Zero);
+        }
+
+        if (result != 0) return null;
+
+        Array.Resize(ref paths, (int)pathCount);
+        Array.Resize(ref modes, (int)modeCount);
+        return new Topology { Paths = paths, Modes = modes };
     }
 
     /// <summary>
     /// Query with the first flag that the machine accepts.
     /// </summary>
-    /// <remarks>
-    /// The three query flags are NOT interchangeable in practice.  On
-    /// this machine only QDC_DATABASE_CURRENT is accepted, and both
-    /// QDC_ALL_PATHS and QDC_ONLY_ACTIVE_PATHS answer
-    /// ERROR_INVALID_PARAMETER (87) - even though the SDK says they
-    /// are valid.  The reason is the driver's own state, but the
-    /// effect is the same: a query that works on one machine fails on
-    /// another.
-    ///
-    /// So the flags are tried in turn and the first one that answers
-    /// is used.  The order puts the database first, because that is
-    /// the query the attach needs.
-    /// </remarks>
     private static Topology? QueryAny(params uint[] flagOptions)
     {
         foreach (var flags in flagOptions)

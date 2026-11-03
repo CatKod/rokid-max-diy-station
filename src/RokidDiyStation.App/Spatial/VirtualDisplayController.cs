@@ -111,7 +111,8 @@ public static class VirtualDisplayController
     /// Whether the virtual display is currently on the desktop.
     /// </summary>
     public static bool IsAttached()
-        => VirtualDisplayLocator.FindVirtual() is not null;
+        => VirtualDisplayLocator.FindVirtual() is not null
+           || DisplayConfigController.IsVirtualActive();
 
     /// <summary>
     /// Open the virtual display.
@@ -145,13 +146,21 @@ public static class VirtualDisplayController
     {
         if (!DisplayConfigController.Detach())
         {
-            // The CCD API may be unavailable on a machine whose
-            // topology it cannot read.  The legacy detach still takes
-            // the monitor off the desktop, even though it cannot be
-            // undone with the legacy API - but the CCD attach would
-            // still bring it back, because the adapter survives.
-            var ok = VirtualDisplayLocator.Detach();
-            return ok && WaitForMonitorGone(VanishTimeoutMs);
+            // THE LEGACY DETACH IS NOT USED AS A FALLBACK.
+            //
+            // It used to be.  The legacy detach takes the monitor off
+            // the desktop by setting a zero-width mode, and that is a
+            // ONE-WAY DOOR: the adapter's StateFlags drop from 0x1 to
+            // 0x0, EnumDisplaySettings fails for that adapter from
+            // then on, and every later re-attach attempt - through
+            // the legacy API OR through CCD - answers DISP_CHANGE_FAILED
+            // (-1).
+            //
+            // So if the CCD detach fails, the virtual display stays
+            // where it is.  A visible virtual display is a cosmetic
+            // problem; a virtual display that can never come back is
+            // a broken product.
+            return false;
         }
 
         return WaitForMonitorGone(VanishTimeoutMs);

@@ -276,6 +276,120 @@ into `TrustedPublisher` was enough. It is still an admin operation.
 
 ---
 
+## 5a. The CCD binding was wrong, and it took a day to find
+
+Stage 0 attached the virtual display with the **legacy** API
+(`ChangeDisplaySettingsEx`). That worked, and it is also a **one-way
+door**: setting a zero-width mode to detach the monitor persists a
+zero-width mode, after which `EnumDisplaySettings` fails for the
+adapter and every re-attach answers `DISP_CHANGE_FAILED (-1)`.
+
+So the lifecycle was rewritten on the **CCD** API
+(`QueryDisplayConfig` / `SetDisplayConfig`), which removes a display
+*path* instead of tearing the adapter out — and therefore reverses
+cleanly.
+
+That rewrite did not work. And the reason was not the driver, the
+settings, or the machine. **The P/Invoke signatures were invented.**
+
+Read from the Windows SDK (10.0.26100.0, `um/WinUser.h`):
+
+```c
+LONG GetDisplayConfigBufferSizes(
+    UINT32 flags, UINT32* numPathArrayElements, UINT32* numModeInfoArrayElements);
+
+LONG SetDisplayConfig(
+    UINT32 numPathArrayElements, DISPLAYCONFIG_PATH_INFO* pathArray,
+    UINT32 numModeInfoArrayElements, DISPLAYCONFIG_MODE_INFO* modeInfoArray,
+    UINT32 flags);                                     // ← flags LAST
+
+LONG QueryDisplayConfig(
+    UINT32 flags, UINT32* numPathArrayElements,
+    DISPLAYCONFIG_PATH_INFO* pathArray, UINT32* numModeInfoArrayElements,
+    DISPLAYCONFIG_MODE_INFO* modeInfoArray,
+    DISPLAYCONFIG_TOPOLOGY_ID* currentTopologyId);     // ← SIX arguments
+```
+
+What the code declared instead:
+
+```c
+GetDisplayConfigBufferSizes(flags, *path, *mode, *target, *source)
+QueryDisplayConfig(flags, *path, paths, *mode, modes,
+                   *target, targets, *source, sources)
+SetDisplayConfig(flags, paths, pathCount, modes, modeCount)
+```
+
+There are **no** target-name or source-name arrays in
+`QueryDisplayConfig` — the names come from `DisplayConfigGetDeviceInfo`,
+one target at a time — and `SetDisplayConfig` takes the flags **last**.
+
+### The symptom that hid the cause
+
+Every struct size was correct, so nothing threw. The API simply
+answered `ERROR_INVALID_PARAMETER (87)` for configurations that were
+perfectly valid, and the app concluded the topology was unreadable.
+
+The tell was that `QDC_ALL_PATHS` and `QDC_ONLY_ACTIVE_PATHS` answered
+87 while `QDC_DATABASE_CURRENT` worked — a difference that had nothing
+to do with the flags. The SDK explains it in its own annotation of the
+last parameter:
+
+```c
+_When_(!(flags & QDC_DATABASE_CURRENT), _Pre_null_)
+_When_(flags & QDC_DATABASE_CURRENT, _Out_)
+    DISPLAYCONFIG_TOPOLOGY_ID* currentTopologyId);
+```
+
+The old binding passed a **pointer** where **NULL** was required, so the
+API rejected every query that did not want a topology id — which is every
+query except the one that was least useful. With the topology id passed
+as `NULL`, `QDC_ALL_PATHS` works and returns the database's 57 paths,
+among them the virtual display's inactive path.
+
+### The second thing that had to be built, not read
+
+The virtual display's path in the database has `modeInfoIdx =
+0xFFFFFFFF` in both halves — **INVALID**. A display that has never been
+on the desktop has no recorded source or target mode, so the modes have
+to be *built*:
+
+* the target mode from the target's **preferred** mode, which
+  `DisplayConfigGetDeviceInfo` supplies with the full
+  `VIDEO_SIGNAL_INFO`;
+* the source mode from the same width and height in 32bpp, at the
+  requested position.
+
+And `SDC_ALLOW_PATH_ORDER_CHANGES` is **rejected** with 87 when a path
+is added that was not in the previous topology — which is exactly what
+the attach does. The flag sets are therefore tried in turn, and the set
+that validates is the set that is applied.
+
+### The result
+
+`tools/ProbeSpatialLifecycle` drives the app's own
+`VirtualDisplayController.Open()` / `.Close()` three times in a row:
+
+```
+round 1: OPEN -> True   the virtual screen is 7680x1080   monitor at (-1920,0)
+         CLOSE -> True  the virtual screen is 5760x1080
+round 2: OPEN -> True   the virtual screen is 7680x1080
+         CLOSE -> True  the virtual screen is 5760x1080
+round 3: OPEN -> True   the virtual screen is 7680x1080
+         CLOSE -> True  the virtual screen is 5760x1080
+```
+
+Three clean cycles. The display is genuinely reversible, and it needs
+no administrator rights.
+
+### What is now tested
+
+`tests/RokidDiyStation.App.Tests/DisplayConfigSignatureTests.cs` pins
+the **argument counts** — three, six, five — and the fact that the
+flags are last. A struct-size test was not enough: the bug was in the
+argument lists, and a wrong argument list produces no exception at all.
+
+---
+
 ## 6. The honest costs
 
 1. **"Lost mouse."** The cursor leaves the physical screen when it crosses

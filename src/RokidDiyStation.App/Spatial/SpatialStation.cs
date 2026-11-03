@@ -310,9 +310,15 @@ public sealed class SpatialStation : IDisposable
         // always attached to the machine, so there is nothing to
         // "publish" first.
         //
-        // The legacy attach below is the fallback for the case where
-        // the CCD API cannot read this machine's topology.
-        if (!VirtualDisplayController.Open() && !VirtualDisplayLocator.AttachDefault())
+        // THE LEGACY ATTACH IS NOT USED AS A FALLBACK.
+        //
+        // It used to be.  The legacy attach is
+        // ChangeDisplaySettingsEx, and an IddCx INDIRECT display does
+        // not support the legacy mode-setting path at all: the call
+        // answers DISP_CHANGE_FAILED (-1) for every mode and every
+        // field combination.  So it could never work here anyway, and
+        // keeping it only risked the one-way door.
+        if (!VirtualDisplayController.Open())
         {
             Log("The virtual display could not be attached. "
                 + "Is the Virtual Display Driver installed?");
@@ -369,9 +375,22 @@ public sealed class SpatialStation : IDisposable
         var ok = VirtualDisplayController.Close();
         if (!ok)
         {
-            // Fall back to the plain detach, which at least takes the
-            // monitor off the desktop.
-            ok = VirtualDisplayLocator.Detach();
+            // There is deliberately NO legacy fallback here.
+            //
+            // The legacy detach takes the monitor off the desktop by
+            // setting a zero-width mode, and that is a ONE-WAY DOOR:
+            // the adapter's StateFlags drop from 0x1 to 0x0,
+            // EnumDisplaySettings fails for that adapter from then on,
+            // and every later re-attach attempt answers
+            // DISP_CHANGE_FAILED (-1).  The virtual display would then
+            // never come back.
+            //
+            // A leftover virtual monitor is a cosmetic problem.  A
+            // virtual monitor that can never be reopened is a broken
+            // product, so the display stays.
+            Log("The virtual display could not be detached. "
+                + "The legacy fallback is not used because it would make the "
+                + "display impossible to reopen.");
         }
 
         Log(ok ? "Spatial display closed." : "The virtual display could not be detached.");

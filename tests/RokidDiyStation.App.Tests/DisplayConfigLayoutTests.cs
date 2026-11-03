@@ -78,14 +78,6 @@ public class DisplayConfigLayoutTests
     }
 
     [Fact]
-    public void TheSourceNameStructMatchesTheSdk()
-    {
-        // DISPLAYCONFIG_SOURCE_DEVICE_NAME = 84 bytes on x64.
-        Assert.Equal(84, Marshal.SizeOf<DisplayConfigController.DISPLAYCONFIG_SOURCE_DEVICE_NAME>());
-        Assert.Equal(20, (int)Marshal.OffsetOf<DisplayConfigController.DISPLAYCONFIG_SOURCE_DEVICE_NAME>("viewGdiDeviceName"));
-    }
-
-    [Fact]
     public void ThePreferredModeStructMatchesTheSdk()
     {
         // DISPLAYCONFIG_TARGET_PREFERRED_MODE is 80 bytes on x64.
