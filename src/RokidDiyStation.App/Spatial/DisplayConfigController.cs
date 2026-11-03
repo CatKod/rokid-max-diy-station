@@ -112,6 +112,8 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
+using RokidDiyStation.Core.Spatial;
+
 namespace RokidDiyStation.App.Spatial;
 
 /// <summary>
@@ -811,8 +813,118 @@ public static class DisplayConfigController
 
         paths.Add(newPath);
 
+        // The requested position was computed from the SHELL's view of
+        // the desktop, and the shell's view can be a moment behind the
+        // display-configuration database's.  If the two disagree, the
+        // virtual display can land on top of a physical one - and
+        // Windows forbids overlapping rectangles outright, so the
+        // attach fails with 87 and the spatial display never opens.
+        //
+        // So the position is checked against the paths that are
+        // actually going to be sent, and the virtual display is moved
+        // clear of them if it overlaps.  It goes to the LEFT of the
+        // leftmost survivor, which is where the spatial canvas
+        // belongs anyway.
+        PlaceVirtualClearOfSurvivors(paths, modes);
+
         if (!Apply(paths, modes)) return false;
         return IsVirtualActive();
+    }
+
+    /// <summary>
+    /// Move the virtual display out of the way if it overlaps one of
+    /// the displays that are already on the desktop.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The attach's requested position is a COMPUTED one - see
+    /// <see cref="VirtualDisplayController.ComputeAttachPosition"/> -
+    /// and it is computed from the shell's enumeration of the
+    /// monitors.  That enumeration is a snapshot, and the desktop
+    /// moves between the snapshot and the apply: Windows re-lays out
+    /// the survivors when a monitor is plugged or unplugged, and the
+    /// IddCx driver re-publishes the virtual display's monitor at the
+    /// same time.
+    /// </para>
+    /// <para>
+    /// When the two views disagree, the virtual display lands on top
+    /// of a physical one, and Windows refuses the whole
+    /// configuration with 87 (ERROR_INVALID_PARAMETER) - so the
+    /// spatial display does not open at all.
+    /// </para>
+    /// <para>
+    /// The fix is to check the position against the paths that are
+    /// actually being sent, and to move the virtual display to the
+    /// left of the leftmost survivor when it overlaps.  Nothing is
+    /// moved when there is no overlap, so the ordinary case is
+    /// untouched.
+    /// </para>
+    /// </remarks>
+    private static void PlaceVirtualClearOfSurvivors(
+        List<DISPLAYCONFIG_PATH_INFO> paths,
+        List<DISPLAYCONFIG_MODE_INFO> modes)
+    {
+        // The virtual display's own rectangle.
+        var (vx, vy) = (0, 0);
+        var (vw, vh) = (0, 0);
+        DISPLAYCONFIG_PATH_INFO? virtualPath = null;
+
+        foreach (var p in paths)
+        {
+            if ((p.flags & PATH_ACTIVE) == 0) continue;
+            if (!IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id)) continue;
+
+            virtualPath = p;
+            (vx, vy) = SourcePositionOf(modes, p);
+            (vw, vh) = SourceSizeOf(modes, p);
+            break;
+        }
+
+        if (virtualPath is null || vw <= 0 || vh <= 0) return;
+
+        // The survivors' rectangles.
+        var survivors = new List<DesktopRect>();
+        foreach (var p in paths)
+        {
+            if ((p.flags & PATH_ACTIVE) == 0) continue;
+            if (IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id)) continue;
+
+            var (x, y) = SourcePositionOf(modes, p);
+            var (w, h) = SourceSizeOf(modes, p);
+            if (w <= 0 || h <= 0) continue;
+            survivors.Add(new DesktopRect(x, y, x + w, y + h));
+        }
+
+        if (survivors.Count == 0) return;
+
+        var virtualRect = new DesktopRect(vx, vy, vx + vw, vy + vh);
+        bool overlaps = false;
+        foreach (var s in survivors)
+        {
+            if (!virtualRect.Intersects(s)) continue;
+            overlaps = true;
+            break;
+        }
+        if (!overlaps) return;
+
+        // To the left of the leftmost survivor, on the same row.
+        int leftmost = int.MaxValue;
+        int top = 0;
+        foreach (var s in survivors)
+        {
+            if (s.Left < leftmost)
+            {
+                leftmost = s.Left;
+                top = s.Top;
+            }
+        }
+
+        int newX = leftmost - vw;
+        SetSourcePosition(modes, virtualPath.Value, newX, top);
+
+        Log($"Display config: the virtual display was moved from ({vx},{vy}) to "
+            + $"({newX},{top}) because it overlapped a display that is already on "
+            + "the desktop.");
     }
 
     /// <summary>
@@ -899,8 +1011,26 @@ public static class DisplayConfigController
 
         if (outcome == DetachOutcome.AlreadyDetached)
         {
-            Log("Detach: the virtual display is already off the desktop.");
-            return true;
+            // "Already detached" is only true if the SHELL agrees.
+            //
+            // The CCD's view and the shell's view are two different
+            // things, and they can disagree: the display-configuration
+            // path can be inactive while the IddCx driver still has
+            // its monitor published on the desktop.  The user then
+            // sees a rectangle that the code believes it has removed,
+            // which is exactly the complaint.
+            //
+            // So the shell is asked as well, and if the shell still
+            // draws the virtual monitor the detach is NOT a success.
+            if (!ShellHasVirtualMonitor())
+            {
+                Log("Detach: the virtual display is already off the desktop.");
+                return true;
+            }
+
+            Log("Detach: the display configuration says the virtual display is off, "
+                + "but the shell is still drawing it.");
+            return false;
         }
 
         // The removal was applied.  Now it has to STAY removed.
@@ -948,7 +1078,7 @@ public static class DisplayConfigController
     /// round of Windows' own topology rebuild, which is what used to
     /// put the display back.
     /// </remarks>
-    private const int SettleWindowMs = 1500;
+    private const int SettleWindowMs = 2000;
 
     /// <summary>
     /// How long the display is given to actually leave the topology
@@ -987,7 +1117,7 @@ public static class DisplayConfigController
 
         while (Environment.TickCount64 < deadline)
         {
-            bool present = IsVirtualActive();
+            bool present = IsVirtualActive() || ShellHasVirtualMonitor();
 
             if (present && Environment.TickCount64 - start > SettleGraceMs)
                 return false;
@@ -995,8 +1125,32 @@ public static class DisplayConfigController
             Thread.Sleep(SettlePollMs);
         }
 
-        return !IsVirtualActive();
+        return !IsVirtualActive() && !ShellHasVirtualMonitor();
     }
+
+    /// <summary>
+    /// Whether the SHELL is drawing the virtual monitor.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the user's view of the desktop - the rectangle they can
+    /// see and drag a window onto - and it is NOT the same thing as the
+    /// display configuration's view.
+    /// </para>
+    /// <para>
+    /// The code checks both, because the two can disagree.  The
+    /// display configuration can say the virtual display's path is
+    /// inactive while the IddCx driver still has its monitor
+    /// published, and then the user is looking at a rectangle that the
+    /// code has already written off as removed.
+    /// </para>
+    /// <para>
+    /// The shell's monitor list is the identity check's own, so it
+    /// cannot go stale: it is the EDID, not a position.
+    /// </para>
+    /// </remarks>
+    private static bool ShellHasVirtualMonitor()
+        => VirtualDisplayLocator.FindVirtual() is not null;
 
     /// <summary>
     /// Remove every virtual display path from the desktop.
@@ -1214,18 +1368,71 @@ public static class DisplayConfigController
         // The mode array has to describe the positions as well as the
         // sizes, because SetDisplayConfig reads the position out of
         // the SOURCE MODE, not out of the path.
+        //
+        // WHEN THE DATABASE HAS NOTHING TO SAY ABOUT A SURVIVOR, THE
+        // LIVE POSITION IS KEPT.
+        //
+        // The database holds one record per topology the machine has
+        // ever been in, and which record is current depends on which
+        // monitors are plugged in.  With TWO physical monitors the
+        // current record does not always hold a path for every
+        // survivor - and the old code answered (0, 0) for the ones it
+        // could not find.  (0, 0) is the ORIGIN, and the origin is
+        // where the laptop panel is, so the survivor was sent ON TOP
+        // of the laptop panel.  Windows forbids overlapping
+        // rectangles, so it refused the whole configuration with 87
+        // and the detach silently did nothing - which is the user's
+        // bug, and it is the one that only showed up with two
+        // monitors.
+        //
+        // So the live position is kept for a survivor the database
+        // knows nothing about.  The live position is the one the user
+        // is looking at, so it is the safest answer.
+        bool databaseWasUsed = false;
         for (int i = 0; i < paths.Count; i++)
         {
             var p = paths[i];
             if ((p.flags & PATH_ACTIVE) == 0) continue;
-            var (x, y) = SourcePositionOf(positionSource.Modes, p);
+
+            if (!TrySourcePositionOf(positionSource.Modes, p, out var x, out var y))
+            {
+                Log($"Detach: the database has no position for target {p.targetInfo.id}, "
+                    + "so the live one is kept.");
+                continue;
+            }
+
+            databaseWasUsed = true;
             SetSourcePosition(modes, p, x, y);
         }
 
+        if (!databaseWasUsed)
+        {
+            Log("Detach: the database has no positions at all, so the live ones are kept.");
+        }
+
+        // The positions that came out of the database can OVERLAP.
+        //
+        // The database keeps one record per topology the machine has
+        // ever been in, and the records are not consistent with one
+        // another: the record for the topology that included the Rokid
+        // Max holds the virtual display at (1915, -1080), which is a
+        // row of its own above the physical monitors.  When the
+        // survivors' positions come from such a record, the
+        // configuration can be INVALID - Windows rejects overlapping
+        // rectangles with 87 - and the detach silently does nothing,
+        // which is the user's bug.
+        //
+        // So the layout is repaired before it is sent.  This is what
+        // makes the difference between one physical monitor, two, and
+        // three: it is not the number of monitors that decides whether
+        // the layout can be applied, it is whether the record the
+        // positions came from happens to be self-consistent.
+        RepairLayout(paths, modes);
+
         if (Apply(paths, modes)) return DetachOutcome.Removed;
 
-        // SECOND ATTEMPT: pack the survivors from the origin, so that
-        // no two of them overlap.
+        // SECOND ATTEMPT: the survivors packed from the origin, so
+        // that no two of them overlap.
         //
         // Windows forbids overlapping monitor rectangles outright, and
         // a topology change can leave two survivors overlapping -
@@ -1234,19 +1441,34 @@ public static class DisplayConfigController
         // that keeps them where they are can be valid, so the
         // positions have to be rebuilt.
         //
-        // The survivors are laid out left to right from the origin.
+        // The survivors are laid out left to right from the origin, in
+        // the order they are ALREADY in - so the laptop panel stays to
+        // the left of the artist display, exactly as the user has it.
+        // Packing them in the ARRAY's order instead would move the
+        // user's own screens around, which is a much worse answer to
+        // "take the virtual display away" than a rearranged desktop.
+        //
         // The VIRTUAL display's slot is given up and NOT reused: the
         // user asked for the virtual display to be gone, and a
         // leftover gap on the left is the price of that.
         var packedModes = new List<DISPLAYCONFIG_MODE_INFO>(modes);
 
-        int cursorX = 0;
+        var survivors = new List<(DISPLAYCONFIG_PATH_INFO Path, int Width, int Left)>();
         foreach (var p in paths)
         {
             if ((p.flags & PATH_ACTIVE) == 0) continue;
             var (w, _) = SourceSizeOf(positionSource.Modes, p);
-            SetSourcePosition(packedModes, p, cursorX, 0);
-            cursorX += w;
+            var (lx, _) = SourcePositionOf(active.Modes, p);
+            survivors.Add((p, w, lx));
+        }
+
+        survivors.Sort((a, b) => a.Left.CompareTo(b.Left));
+
+        int cursorX = 0;
+        foreach (var s in survivors)
+        {
+            SetSourcePosition(packedModes, s.Path, cursorX, 0);
+            cursorX += s.Width;
         }
 
         Log("Detach: the first attempt was refused; retrying with the survivors packed "
@@ -1292,6 +1514,92 @@ public static class DisplayConfigController
     }
 
     /// <summary>
+    /// Make sure no two of the paths that are going to be sent to
+    /// Windows overlap.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Windows forbids overlapping monitor rectangles outright: a
+    /// configuration whose displays overlap is rejected with 87
+    /// (ERROR_INVALID_PARAMETER), and there is no way to apply it.
+    /// </para>
+    /// <para>
+    /// The positions the code sends are not the ones the user sees.
+    /// The detach sends the DATABASE's positions for the survivors,
+    /// and the database keeps one record per topology the machine has
+    /// ever been in - so it can hold positions that are stale, and
+    /// stale positions overlap.  The record for the topology that
+    /// included the Rokid Max holds the virtual display at
+    /// (1915, -1080), which is exactly on top of the XP-Pen at
+    /// (1920, 0).
+    /// </para>
+    /// <para>
+    /// So the layout is REPAIRED before it is sent: the first display
+    /// keeps its position and the others are laid out to its right,
+    /// with no overlaps.  The repair is only applied when there IS an
+    /// overlap, so a clean layout - the common case - is sent exactly
+    /// as it was read.
+    /// </para>
+    /// </remarks>
+    /// <param name="paths">The paths about to be sent.</param>
+    /// <param name="modes">
+    /// The mode array, whose source modes carry the positions.  It is
+    /// modified in place when a repair is needed.
+    /// </param>
+    /// <returns>True when the layout had to be repaired.</returns>
+    private static bool RepairLayout(
+        List<DISPLAYCONFIG_PATH_INFO> paths,
+        List<DISPLAYCONFIG_MODE_INFO> modes)
+    {
+        // The rectangles of the paths that are going to be on the
+        // desktop, in the order they appear in the array.
+        var rects = new List<DesktopRect>(paths.Count);
+        var live = new List<DISPLAYCONFIG_PATH_INFO>(paths.Count);
+
+        foreach (var p in paths)
+        {
+            if ((p.flags & PATH_ACTIVE) == 0) continue;
+
+            var (x, y) = SourcePositionOf(modes, p);
+            var (w, h) = SourceSizeOf(modes, p);
+            if (w <= 0 || h <= 0) continue;
+
+            rects.Add(new DesktopRect(x, y, x + w, y + h));
+            live.Add(p);
+        }
+
+        if (rects.Count < 2) return false;
+
+        var repaired = SpatialDisplayPlacement.RepairOverlaps(rects);
+        if (ReferenceEquals(repaired, rects)) return false;
+
+        for (int i = 0; i < live.Count; i++)
+        {
+            SetSourcePosition(modes, live[i], repaired[i].Left, repaired[i].Top);
+        }
+
+        Log($"Display config: the layout had {CountOverlaps(rects)} overlapping "
+            + "display(s) and was repaired before it was sent.");
+        return true;
+    }
+
+    /// <summary>
+    /// How many pairs of the given rectangles overlap.
+    /// </summary>
+    private static int CountOverlaps(IReadOnlyList<DesktopRect> rects)
+    {
+        int n = 0;
+        for (int i = 0; i < rects.Count; i++)
+        {
+            for (int j = i + 1; j < rects.Count; j++)
+            {
+                if (rects[i].Intersects(rects[j])) n++;
+            }
+        }
+        return n;
+    }
+
+    /// <summary>
     /// A path's source mode position, matched BY IDENTITY rather than
     /// by index.
     /// </summary>
@@ -1313,21 +1621,67 @@ public static class DisplayConfigController
     /// The source mode is therefore found by its adapter and id, which
     /// are stable across queries.
     /// </para>
+    /// <para>
+    /// WHEN THERE IS NO SUCH MODE, THE POSITION IS NOT (0, 0)
+    /// ------------------------------------------------------
+    /// The old code answered (0, 0) - which is the ORIGIN, and the
+    /// origin is where the laptop panel usually is.  So a survivor
+    /// whose position could not be looked up was sent ON TOP of the
+    /// laptop panel, and Windows refused the whole configuration with
+    /// 87 (ERROR_INVALID_PARAMETER) - because overlapping rectangles
+    /// are not allowed.
+    /// </para>
+    /// <para>
+    /// The lookup fails when the DATABASE's current topology does not
+    /// hold a path for that survivor - and the database holds one
+    /// record per topology the machine has ever been in, so which
+    /// record is current depends on which monitors are plugged in.
+    /// That is why this only showed up with TWO physical monitors:
+    /// with one, or with three, the record that happened to be current
+    /// held every survivor, so the lookup always succeeded.
+    /// </para>
+    /// <para>
+    /// So the lookup now REPORTS the failure, and the caller keeps the
+    /// position the live session already has.  A position that is
+    /// known to be wrong is worse than one that is merely unknown.
+    /// </para>
     /// </remarks>
-    private static (int X, int Y) SourcePositionOf(
-        DISPLAYCONFIG_MODE_INFO[] modes, DISPLAYCONFIG_PATH_INFO path)
+    private static bool TrySourcePositionOf(
+        IReadOnlyList<DISPLAYCONFIG_MODE_INFO> modes,
+        DISPLAYCONFIG_PATH_INFO path,
+        out int x, out int y)
     {
-        for (int m = 0; m < modes.Length; m++)
+        for (int m = 0; m < modes.Count; m++)
         {
             var mode = modes[m];
             if (mode.infoType != MODE_INFO_TYPE_SOURCE) continue;
             if (!mode.adapterId.SameAs(path.sourceInfo.adapterId)) continue;
             if (mode.id != path.sourceInfo.id) continue;
-            return (mode.sourceMode.position.x, mode.sourceMode.position.y);
+
+            x = mode.sourceMode.position.x;
+            y = mode.sourceMode.position.y;
+            return true;
         }
 
-        return (0, 0);
+        x = 0;
+        y = 0;
+        return false;
     }
+
+    /// <summary>
+    /// A path's source mode position, matched BY IDENTITY rather than
+    /// by index.
+    /// </summary>
+    /// <remarks>
+    /// The caller cannot tell whether the lookup succeeded, so this
+    /// one is only for the places where the caller already knows the
+    /// mode is there - see
+    /// <see cref="TrySourcePositionOf"/> for the version that reports
+    /// it.
+    /// </remarks>
+    private static (int X, int Y) SourcePositionOf(
+        IReadOnlyList<DISPLAYCONFIG_MODE_INFO> modes, DISPLAYCONFIG_PATH_INFO path)
+        => TrySourcePositionOf(modes, path, out var x, out var y) ? (x, y) : (0, 0);
 
     /// <summary>
     /// A path's source mode size, matched BY IDENTITY rather than by
@@ -1339,9 +1693,9 @@ public static class DisplayConfigController
     /// array being searched.
     /// </remarks>
     private static (int Width, int Height) SourceSizeOf(
-        DISPLAYCONFIG_MODE_INFO[] modes, DISPLAYCONFIG_PATH_INFO path)
+        IReadOnlyList<DISPLAYCONFIG_MODE_INFO> modes, DISPLAYCONFIG_PATH_INFO path)
     {
-        for (int m = 0; m < modes.Length; m++)
+        for (int m = 0; m < modes.Count; m++)
         {
             var mode = modes[m];
             if (mode.infoType != MODE_INFO_TYPE_SOURCE) continue;

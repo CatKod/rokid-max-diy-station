@@ -81,6 +81,13 @@ internal static class Program
         // dispatcher's thread.
         single.OnQuitRequested += () => tray.RequestQuit();
 
+        // And the same for the "close the spatial display" command,
+        // which is the user's actual complaint: closing the spatial
+        // display has to take the virtual display off the desktop, and
+        // that has to be checkable without a mouse click.
+        single.OnCloseSpatialRequested += () => tray.RequestCloseSpatialDisplay();
+        single.OnOpenSpatialRequested += () => tray.RequestOpenSpatialDisplay();
+
         // The single-instance mutex is released EXPLICITLY on the way
         // out, not left to the garbage collector.
         //

@@ -355,6 +355,49 @@ public sealed class TrayApplicationContext
     }
 
     /// <summary>
+    /// Close the spatial display, from a request that arrived on
+    /// another thread.
+    /// </summary>
+    /// <remarks>
+    /// This is the tray menu's "Close the spatial display", exposed on
+    /// the pipe so that the behaviour can be verified without a mouse
+    /// click.
+    ///
+    /// It has to be marshalled onto the dispatcher for the same reason
+    /// as the quit: the station's close touches WPF windows and the
+    /// GPU.
+    /// </remarks>
+    public void RequestCloseSpatialDisplay()
+    {
+        void DoClose() => CloseSpatialDisplay();
+
+        if (_mainWindow.Dispatcher.CheckAccess()) DoClose();
+        else _mainWindow.Dispatcher.BeginInvoke(new Action(DoClose));
+    }
+
+    /// <summary>
+    /// Open the spatial display, from a request that arrived on
+    /// another thread.
+    /// </summary>
+    /// <remarks>
+    /// This is the tray menu's "Open the spatial display", exposed on
+    /// the pipe so that the OPEN side of the round trip can be
+    /// verified too.
+    ///
+    /// Without it, a test can only ever watch the display go away -
+    /// and a display that goes away and can never come back is not a
+    /// working product either.  The user's complaint was about the
+    /// close, but the close is only half of the contract.
+    /// </remarks>
+    public void RequestOpenSpatialDisplay()
+    {
+        void DoOpen() => OpenSpatialDisplay();
+
+        if (_mainWindow.Dispatcher.CheckAccess()) DoOpen();
+        else _mainWindow.Dispatcher.BeginInvoke(new Action(DoOpen));
+    }
+
+    /// <summary>
     /// Bring the OS cursor back onto the physical desktop.
     /// </summary>
     /// <remarks>

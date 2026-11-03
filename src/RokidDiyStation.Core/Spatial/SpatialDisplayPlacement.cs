@@ -56,6 +56,24 @@ public readonly record struct DesktopRect(int Left, int Top, int Right, int Bott
 
     /// <summary>The rectangle's height.</summary>
     public int Height => Bottom - Top;
+
+    /// <summary>
+    /// Whether this rectangle intersects another one.
+    /// </summary>
+    /// <remarks>
+    /// Windows forbids overlapping monitor rectangles outright: a
+    /// configuration whose displays overlap is rejected with 87
+    /// (ERROR_INVALID_PARAMETER), and there is no way to apply it.
+    /// That is why this predicate exists - it is the condition the
+    /// whole layout-repair logic is built around.
+    ///
+    /// Touching edges do NOT count as an overlap.  Two displays that
+    /// share a border are the normal case - that is how Windows lays
+    /// a desktop out.
+    /// </remarks>
+    public bool Intersects(DesktopRect other)
+        => Left < other.Right && other.Left < Right
+        && Top < other.Bottom && other.Top < Bottom;
 }
 
 /// <summary>
@@ -113,5 +131,173 @@ public static class SpatialDisplayPlacement
         // which is what Windows expects of a well-formed desktop, and
         // a gap would leave a dead strip the mouse can travel into.
         return (leftmost - width, top);
+    }
+
+    /// <summary>
+    /// Repair a layout whose display rectangles overlap.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// WHY THIS EXISTS
+    /// --------------
+    /// Windows refuses a configuration whose display rectangles
+    /// overlap: SetDisplayConfig answers 87 (ERROR_INVALID_PARAMETER)
+    /// and nothing can be applied.  That is the rule.
+    /// </para>
+    /// <para>
+    /// The user's machine runs into it after a monitor is unplugged.
+    /// The display-configuration DATABASE keeps one record per
+    /// topology the machine has ever been in, and each record has its
+    /// own positions.  When the Rokid Max was unplugged, the layout
+    /// was rebuilt from a record that put the virtual display at
+    /// (1915, -1080) - which overlaps the XP-Pen artist display at
+    /// (1920, 0).  The rebuilt desktop therefore contained an
+    /// overlap, and every attempt to change it - the attach and the
+    /// detach alike - was rejected with 87, so the virtual display
+    /// stayed on the desktop.
+    /// </para>
+    /// <para>
+    /// The repair keeps the FIRST display where it is and lays the
+    /// others out to its right, in the order they were given.  That
+    /// preserves the user's arrangement as far as possible: the
+    /// display the user is looking at does not move.
+    /// </para>
+    /// <para>
+    /// BUT A DISPLAY ON ANOTHER ROW IS NOT MOVED AT ALL
+    /// -------------------------------------------------
+    /// The user's own machine holds a record that puts the virtual
+    /// display at (1915, -1080) - a whole row ABOVE the physical
+    /// monitors, which is where Windows had put it when the Rokid Max
+    /// was still attached.  A display that is above the others is not
+    /// overlapping them: it is a display on its own row, and that is a
+    /// perfectly valid desktop.
+    /// </para>
+    /// <para>
+    /// The old repair could not tell the two apart, because it only
+    /// ever compared rectangles.  So it dragged the virtual display
+    /// DOWN onto the row of the physical monitors - and, when the
+    /// display it moved was the XP-Pen, it dragged a PHYSICAL monitor
+    /// with it.  A repair that moves the user's own displays is worse
+    /// than the overlap it was meant to fix.
+    /// </para>
+    /// <para>
+    /// So the repair is done PER ROW: the displays are grouped by the
+    /// row they are on, and only the displays that share a row are
+    /// rearranged among themselves.  A display on a row of its own is
+    /// left exactly where it is.
+    /// </para>
+    /// </remarks>
+    /// <param name="displays">The displays, in the order they should be laid out.</param>
+    /// <returns>
+    /// The repaired rectangles, in the same order.  The list is
+    /// returned unchanged when there is nothing to repair.
+    /// </returns>
+    public static IReadOnlyList<DesktopRect> RepairOverlaps(
+        IReadOnlyList<DesktopRect> displays)
+    {
+        if (displays is null || displays.Count == 0)
+            return Array.Empty<DesktopRect>();
+
+        // Is anything wrong at all?  The common case is a clean
+        // layout, and this keeps the common case free of allocations.
+        bool broken = false;
+        for (int i = 0; i < displays.Count && !broken; i++)
+        {
+            for (int j = i + 1; j < displays.Count; j++)
+            {
+                if (!displays[i].Intersects(displays[j])) continue;
+                broken = true;
+                break;
+            }
+        }
+        if (!broken) return displays;
+
+        // The repair is done PER ROW.
+        //
+        // The displays are grouped by the row they are on - two
+        // displays share a row when their vertical ranges overlap -
+        // and only the displays within a row are rearranged among
+        // themselves.  A display on a row of its own is left exactly
+        // where it is.
+        //
+        // The old repair put everything on ONE row, which dragged the
+        // virtual display down from (1915, -1080) onto the physical
+        // monitors' row - and, when the display it moved happened to
+        // be a physical one, dragged the user's own screen with it.
+        var result = new List<DesktopRect>(displays.Count);
+
+        foreach (var r in displays)
+        {
+            if (r.Width <= 0 || r.Height <= 0)
+            {
+                // A degenerate rectangle is not a display; it is kept
+                // as it is so the caller can still match it up.
+                result.Add(r);
+                continue;
+            }
+
+            // The displays that share this one's row, and have been
+            // placed already.
+            var row = new List<DesktopRect>();
+            foreach (var placed in result)
+            {
+                if (placed.Width <= 0 || placed.Height <= 0) continue;
+                if (!SharesRow(placed, r)) continue;
+                row.Add(placed);
+            }
+
+            if (row.Count == 0)
+            {
+                // Its own row.  It stays where it is.
+                result.Add(r);
+                continue;
+            }
+
+            // To the right of the rightmost display already on this
+            // row, and clear of everything else as well.
+            int x = int.MinValue;
+            foreach (var placed in row)
+            {
+                if (placed.Right > x) x = placed.Right;
+            }
+
+            while (Overlaps(result, x, r.Top, r.Width, r.Height))
+            {
+                x += 1;
+            }
+
+            result.Add(new DesktopRect(x, r.Top, x + r.Width, r.Bottom));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Whether two displays are on the same row of the desktop.
+    /// </summary>
+    /// <remarks>
+    /// A row is a band of vertical space.  Two displays are on the
+    /// same row when their vertical ranges overlap - which is what
+    /// makes them compete for the same horizontal space.
+    ///
+    /// Touching edges do NOT count: two displays stacked exactly on
+    /// top of each other are on different rows, and that is a valid
+    /// desktop.
+    /// </remarks>
+    private static bool SharesRow(DesktopRect a, DesktopRect b)
+        => a.Top < b.Bottom && b.Top < a.Bottom;
+
+    /// <summary>
+    /// Whether a rectangle would overlap any of the given ones.
+    /// </summary>
+    private static bool Overlaps(
+        IReadOnlyList<DesktopRect> placed, int left, int top, int width, int height)
+    {
+        var candidate = new DesktopRect(left, top, left + width, top + height);
+        foreach (var r in placed)
+        {
+            if (candidate.Intersects(r)) return true;
+        }
+        return false;
     }
 }

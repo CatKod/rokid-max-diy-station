@@ -218,6 +218,26 @@ The A/B proof against the old code is in
 `docs/M14-ISSUE-1-CCD-DETACH-DIAGNOSIS.md`, and the deep research
 behind it is in `docs/M14-CCD-TEARDOWN-DEEP-RESEARCH.md`.
 
+### The follow-up: the two-monitor close
+
+The fix above explains the **displacement** - the virtual display coming
+back at (1915, -1080). It did **not** explain why, on a two-monitor
+machine, the detach failed to take the display away **at all** while
+the app reported success.
+
+That was a second, separate defect, and it is diagnosed in
+`docs/M15-ISSUE-2-TWO-MONITOR-CLOSE.md`. In short: the detach takes
+the survivors' positions from the display database, and with two
+monitors the current record did not hold a position for every
+survivor. The lookup answered **(0, 0)** for the ones it could not
+find - which is not "unknown" but the origin, where the laptop panel
+is. The survivor was sent on top of the laptop panel, Windows rejected
+the overlapping rectangles with 87, and the detach silently did
+nothing.
+
+The number of monitors was never the cause. It decided whether the
+database's current record happened to be complete.
+
 ## Sources
 
 - Microsoft Learn: [SetDisplayConfig](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setdisplayconfig)

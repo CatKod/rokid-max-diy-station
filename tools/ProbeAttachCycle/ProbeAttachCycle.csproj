@@ -15,6 +15,11 @@
     <Compile Include="..\..\src\RokidDiyStation.App\Spatial\DisplayConfigController.cs" Link="DisplayConfigController.cs" />
     <Compile Include="..\..\src\RokidDiyStation.App\Spatial\DisplayLocator.cs" Link="DisplayLocator.cs" />
     <Compile Include="..\..\src\RokidDiyStation.App\Spatial\VirtualDisplayLocator.cs" Link="VirtualDisplayLocator.cs" />
+    <!-- The identity policy, and the placement maths the controller
+         now uses.  Both were added after this probe was written, and
+         a probe that cannot compile measures nothing. -->
+    <Compile Include="..\..\src\RokidDiyStation.App\Spatial\VirtualDisplayIdentity.cs" Link="VirtualDisplayIdentity.cs" />
+    <Compile Include="..\..\src\RokidDiyStation.Core\Spatial\SpatialDisplayPlacement.cs" Link="SpatialDisplayPlacement.cs" />
   </ItemGroup>
 
 </Project>

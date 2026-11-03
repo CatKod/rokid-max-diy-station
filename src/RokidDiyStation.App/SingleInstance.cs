@@ -37,6 +37,8 @@
 //   "<hwnd>"     bring the settings window to the front
 //   "reload"     restart the app in place
 //   "quit"       close the spatial display and exit
+//   "close-spatial"  close the spatial display, but keep running
+//   "open-spatial"   open the spatial display, but keep running
 //
 // The reload command exists so that the reload can be driven from the
 // outside - by a script, by a diagnostic tool, or by a test - without
@@ -108,6 +110,33 @@ public sealed class SingleInstance : IDisposable
     /// display and gives the virtual display back.
     /// </remarks>
     public event Action? OnQuitRequested;
+
+    /// <summary>
+    /// Raised when the pipe asks the app to close the spatial display.
+    /// </summary>
+    /// <remarks>
+    /// This is the "Close the spatial display" tray command, exposed
+    /// on the pipe for the same reason as the quit: the user's report
+    /// is about the virtual display NOT going away when the spatial
+    /// display is closed, and that has to be verifiable without a
+    /// mouse click.
+    ///
+    /// It is a DIFFERENT path from the quit, and it has to be tested
+    /// separately, because the quit also tears the process down - and
+    /// a process that is exiting cannot be observed reconciling a
+    /// topology change.
+    /// </remarks>
+    public event Action? OnCloseSpatialRequested;
+
+    /// <summary>
+    /// Raised when the pipe asks the app to open the spatial display.
+    /// </summary>
+    /// <remarks>
+    /// The open side of the round trip.  A close that works but
+    /// cannot be undone is not a fix, so both halves have to be
+    /// drivable from outside the process.
+    /// </remarks>
+    public event Action? OnOpenSpatialRequested;
 
     public event Action<int>? OnShowRequested;
 
@@ -273,6 +302,18 @@ public sealed class SingleInstance : IDisposable
             return;
         }
 
+        if (string.Equals(command, CloseSpatialCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            OnCloseSpatialRequested?.Invoke();
+            return;
+        }
+
+        if (string.Equals(command, OpenSpatialCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            OnOpenSpatialRequested?.Invoke();
+            return;
+        }
+
         if (int.TryParse(command, out var hwnd))
         {
             OnShowRequested?.Invoke(hwnd);
@@ -292,6 +333,38 @@ public sealed class SingleInstance : IDisposable
     /// The pipe command that asks the running instance to quit.
     /// </summary>
     public const string QuitCommand = "quit";
+
+    /// <summary>
+    /// The pipe command that asks the running instance to close the
+    /// spatial display, without quitting.
+    /// </summary>
+    public const string CloseSpatialCommand = "close-spatial";
+
+    /// <summary>
+    /// The pipe command that asks the running instance to open the
+    /// spatial display, without quitting.
+    /// </summary>
+    public const string OpenSpatialCommand = "open-spatial";
+
+    /// <summary>
+    /// Ask the running instance to close the spatial display.
+    /// </summary>
+    /// <returns>True when the command was delivered.</returns>
+    public static bool SignalCloseSpatial()
+    {
+        try
+        {
+            using var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out);
+            client.Connect(timeout: 2000);
+            // UTF8Encoding(false) - no BOM.  See Dispatch().
+            using var writer = new StreamWriter(client, new UTF8Encoding(false));
+            writer.Write(CloseSpatialCommand);
+            writer.Flush();
+            return true;
+        }
+        catch (TimeoutException) { return false; }
+        catch (IOException) { return false; }
+    }
 
     /// <summary>Ask the running instance to show its window.  Returns true
     /// if a signal was delivered (i.e. another instance was already running).</summary>

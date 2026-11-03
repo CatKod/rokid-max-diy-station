@@ -637,7 +637,23 @@ public sealed class SpatialStation : IDisposable
             Thread.Sleep(600);
 
             bool shouldBeOpen = _virtualDisplayShouldBeOpen;
-            bool isOpen = DisplayConfigController.IsVirtualActive();
+
+            // BOTH VIEWS ARE ASKED, NOT JUST THE CCD's.
+            //
+            // The display configuration and the shell are two views of
+            // the same desktop, and they can disagree.  The IddCx
+            // driver re-publishes its monitor when the topology
+            // changes, and there are moments when the configuration's
+            // path says "not active" while the shell is still drawing
+            // the rectangle.
+            //
+            // The old code asked only the configuration, so in those
+            // moments it concluded that everything was in order and
+            // did nothing - while the user was looking at a virtual
+            // display they had asked to have closed.  That is the
+            // user's bug, and it is the one that survives a topology
+            // change.
+            bool isOpen = VirtualDisplayController.IsAttached();
 
             if (shouldBeOpen == isOpen) return;
 

@@ -148,4 +148,109 @@ public class SpatialDisplayPlacementTests
         Assert.Equal(0, x);
         Assert.Equal(0, y);
     }
+
+    // -----------------------------------------------------------------
+    // The overlap repair
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public void TouchingDisplaysDoNotOverlap()
+    {
+        // Two displays that share a border are the normal case: that
+        // is how Windows lays a desktop out.  Treating a shared border
+        // as an overlap would make every ordinary layout "broken".
+        var a = Rect(0, 0, 1920, 1080);
+        var b = Rect(1920, 0, 3840, 1080);
+
+        Assert.False(a.Intersects(b));
+        Assert.False(b.Intersects(a));
+
+        // Stacked exactly on top of each other is an overlap.
+        Assert.True(a.Intersects(Rect(0, 0, 1920, 1080)));
+    }
+
+    [Fact]
+    public void ADisplayOnItsOwnRowIsNotMoved()
+    {
+        // The user's own machine holds a record that puts the virtual
+        // display at (1915, -1080) - a whole row ABOVE the physical
+        // monitors.  That is a valid desktop, and a repair that dragged
+        // it down onto the monitors' row would be worse than the
+        // problem it was meant to solve.
+        var layout = new[]
+        {
+            Rect(1920, 0, 3840, 1080),   // the XP-Pen artist display
+            Rect(0, 0, 1920, 1080),      // the laptop panel
+            Rect(1915, -1080, 3835, 0),  // the virtual display, a row above
+        };
+
+        var repaired = SpatialDisplayPlacement.RepairOverlaps(layout);
+
+        Assert.Equal(3, repaired.Count);
+        Assert.Equal(Rect(1915, -1080, 3835, 0), repaired[2]);
+    }
+
+    [Fact]
+    public void OverlappingDisplaysOnTheSameRowAreSeparated()
+    {
+        // Two displays on the same row that overlap: the repair has to
+        // move one of them, because Windows refuses an overlapping
+        // configuration outright.
+        var layout = new[]
+        {
+            Rect(0, 0, 1920, 1080),
+            Rect(1000, 0, 2920, 1080),
+        };
+
+        var repaired = SpatialDisplayPlacement.RepairOverlaps(layout);
+
+        Assert.Equal(2, repaired.Count);
+        Assert.False(repaired[0].Intersects(repaired[1]));
+    }
+
+    [Fact]
+    public void TheRepairNeverLeavesAnOverlap()
+    {
+        // The property that matters: after the repair, NO two displays
+        // overlap - whatever the layout was.
+        var layouts = new[]
+        {
+            new[] { Rect(0, 0, 1920, 1080), Rect(100, 0, 2020, 1080) },
+            new[] { Rect(0, 0, 1920, 1080), Rect(1920, 0, 3840, 1080), Rect(1915, -1080, 3835, 0) },
+            new[] { Rect(0, 0, 1920, 1080), Rect(500, 0, 2420, 1080), Rect(1000, 0, 2920, 1080) },
+            new[] { Rect(0, 0, 1920, 1080), Rect(100, 100, 2020, 1180) },
+        };
+
+        foreach (var layout in layouts)
+        {
+            var repaired = SpatialDisplayPlacement.RepairOverlaps(layout);
+
+            for (int i = 0; i < repaired.Count; i++)
+            {
+                for (int j = i + 1; j < repaired.Count; j++)
+                {
+                    Assert.False(repaired[i].Intersects(repaired[j]),
+                        $"({repaired[i].Left},{repaired[i].Top}) and "
+                        + $"({repaired[j].Left},{repaired[j].Top}) still overlap");
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public void ACleanLayoutIsNotTouchedAtAll()
+    {
+        // The common case has to stay free of allocations and of
+        // surprises: a layout that is already valid is sent exactly as
+        // it was read.
+        var layout = new[]
+        {
+            Rect(0, 0, 1920, 1080),
+            Rect(1920, 0, 3840, 1080),
+        };
+
+        var repaired = SpatialDisplayPlacement.RepairOverlaps(layout);
+
+        Assert.Same(layout, repaired);
+    }
 }
