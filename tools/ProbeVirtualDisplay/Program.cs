@@ -43,7 +43,7 @@ namespace RokidDiyStation.Tools.ProbeVirtualDisplay;
 
 internal static class Program
 {
-    private static int Main()
+    private static int Main(string[] args)
     {
         Console.WriteLine("=== the initial state ===");
         CountPaths();
@@ -71,6 +71,20 @@ internal static class Program
         DisplayConfigController.Detach();
         Thread.Sleep(1200);
         CountPaths();
+
+        // The probe's default ending is to put the virtual display
+        // BACK, so that a run does not leave the machine without it.
+        //
+        // But "detach" has to be able to leave the machine clean too -
+        // and that is the state the user cares about: the display must
+        // STAY off, not just be off for the moment.  So "detach-only"
+        // skips the restore and the run ends with the display off.
+        if (args.Length > 0 && args[0] == "detach-only")
+        {
+            Console.WriteLine();
+            Console.WriteLine("  ending with the virtual display detached (detach-only).");
+            return 0;
+        }
 
         Console.WriteLine();
         Console.WriteLine($"  restoring: attach -> {DisplayConfigController.Attach(-1920, 0)}");
