@@ -43,7 +43,7 @@ The fix was to stop faking it entirely:
 
 The whole CDP stack was deleted. ~2,000 lines became ~80. And every application works.
 
-Written in C# / .NET 8 — WPF tray shell, D3D11 renderer, Windows Graphics Capture for the display feed, HidSharp for USB HID. 328 tests passing.
+Written in C# / .NET 8 — WPF tray shell, D3D11 renderer, Windows Graphics Capture for the display feed, HidSharp for USB HID. 333 tests passing.
 
 ## Screenshots
 

@@ -155,6 +155,7 @@ off, brings it back, and takes it off again - three times over.
 
 The full diagnosis, with the measurements, is in
 `docs/M15-ISSUE-2-TWO-MONITOR-CLOSE.md`.
+
 ### Tests
 
 333 passing (130 app + 203 core).
