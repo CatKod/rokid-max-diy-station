@@ -1,18 +1,41 @@
 // SPDX-License-Identifier: MIT
 //
-// A diagnostic that exercises the virtual display's attach and detach
-// CYCLE, repeatedly, and reports whether it always works.
+// THE DUPLICATE-PATH HYPOTHESIS.
 //
-// The user's bug: with three physical monitors the detach worked, but
-// with one or two the VDD stayed on the desktop in Extended mode.
+// The app's log has a line that does not add up:
 //
-// This probe runs the cycle several times, and between the cycles it
-// MOVES the physical displays around - which is what a topology
-// change does - so the cycle is exercised against a desktop whose
-// layout keeps changing.
+//   [18:59:53.386] Display config: SetDisplayConfig with 4 path(s):
 //
-// It is a diagnostic, not part of the test suite: it changes the
-// machine's display topology.
+// FOUR paths.  The machine has a laptop panel, the Rokid Max's
+// display, and the virtual display - THREE.  So the app submitted a
+// FOURTH path.
+//
+// WHY THAT WOULD BREAK THE DETACH
+// ------------------------------
+// The detach removes THE virtual path - the FIRST one it finds:
+//
+//   foreach (var p in active.Paths)
+//   {
+//       if (IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id))
+//       {
+//           removed = true;
+//           continue;      // <-- only this ONE is dropped
+//       }
+//       kept.Add(p);
+//   }
+//
+// If the virtual display has TWO active paths - which happens when the
+// IddCx driver re-publishes its monitor after a topology change, and
+// Windows keeps the old path alongside the new one - then the detach
+// drops one of them and KEEPS the other.  The virtual display is still
+// on the desktop, and it is still an active path.
+//
+// That is the user's bug exactly: the VDD stays in Extended mode.
+//
+// THIS PROBE COUNTS THE VIRTUAL DISPLAY'S PATHS, in the active set and
+// in the database, before and after an attach/detach cycle.
+
+using System.Text;
 
 using RokidDiyStation.App.Spatial;
 
@@ -20,98 +43,92 @@ namespace RokidDiyStation.Tools.ProbeVirtualDisplay;
 
 internal static class Program
 {
-    private static int Main(string[] args)
+    private static int Main()
     {
-        var rounds = args.Length > 0 && int.TryParse(args[0], out var r) ? r : 3;
-        var verbose = args.Length > 1 && args[1] == "-v";
-
-        DisplayConfigController.OnDiagnostic += m =>
-        {
-            if (verbose) Console.WriteLine($"    [diag] {m}");
-        };
-
-        int failures = 0;
-
-        for (int i = 1; i <= rounds; i++)
-        {
-            Console.WriteLine($"=== ROUND {i} ===");
-
-            // Start from a known state: the VDD attached.
-            if (!DisplayConfigController.IsVirtualActive())
-            {
-                var ok = DisplayConfigController.Attach(-1920, 0);
-                Console.WriteLine($"  attach -> {ok}");
-                Thread.Sleep(700);
-            }
-
-            // Shuffle the physical displays around.  This is what
-            // Windows does when a monitor is plugged or unplugged, and
-            // it is what invalidates the topology's mode indices.
-            MovePhysicalDisplay(i);
-
-            var before = VirtualDisplayLocator.FindVirtual();
-            Console.WriteLine($"  the virtual display is at ({before?.Bounds.Left},{before?.Bounds.Top})");
-
-            var detached = DisplayConfigController.Detach();
-            Thread.Sleep(700);
-
-            var after = VirtualDisplayLocator.FindVirtual();
-            var active = DisplayConfigController.IsVirtualActive();
-
-            if (detached && after is null && !active)
-            {
-                Console.WriteLine("  DETACH OK - the virtual display is off the desktop.");
-            }
-            else
-            {
-                failures++;
-                Console.WriteLine($"  DETACH FAILED - detached={detached} active={active} "
-                    + $"monitor={(after is null ? "gone" : $"still at ({after.Bounds.Left},{after.Bounds.Top})")}");
-            }
-
-            // And put it back, so the next round starts from the same
-            // state.
-            var reattached = DisplayConfigController.Attach(-1920, 0);
-            Console.WriteLine($"  re-attach -> {reattached}");
-            Thread.Sleep(700);
-        }
+        Console.WriteLine("=== the initial state ===");
+        CountPaths();
 
         Console.WriteLine();
-        Console.WriteLine(failures == 0
-            ? "ALL ROUNDS PASSED."
-            : $"{failures} of {rounds} rounds FAILED.");
+        Console.WriteLine("=== an attach/detach cycle ===");
 
-        return failures == 0 ? 0 : 1;
+        var attached = DisplayConfigController.Attach(-1920, 0);
+        Thread.Sleep(1200);
+        Console.WriteLine($"  attach -> {attached}");
+        CountPaths();
+
+        var detached = DisplayConfigController.Detach();
+        Thread.Sleep(1200);
+        Console.WriteLine($"  detach -> {detached}");
+        CountPaths();
+
+        // And once more, to see whether the count grows.
+        Console.WriteLine();
+        Console.WriteLine("=== a second cycle ===");
+        DisplayConfigController.Attach(-1920, 0);
+        Thread.Sleep(1200);
+        CountPaths();
+
+        DisplayConfigController.Detach();
+        Thread.Sleep(1200);
+        CountPaths();
+
+        Console.WriteLine();
+        Console.WriteLine($"  restoring: attach -> {DisplayConfigController.Attach(-1920, 0)}");
+        Thread.Sleep(1200);
+
+        return 0;
     }
 
     /// <summary>
-    /// Move the physical displays around a little.
+    /// Count the paths that lead to the virtual display, and show them.
     /// </summary>
-    private static void MovePhysicalDisplay(int round)
+    private static void CountPaths()
     {
-        var paths = Ccd.QueryActive(out var modes);
-        if (paths is null) return;
+        var sb = new StringBuilder();
 
-        bool moved = false;
-        foreach (var p in paths)
+        ReportPaths(sb, Ccd.QDC_ONLY_ACTIVE_PATHS, "the ACTIVE set");
+        ReportPaths(sb, Ccd.QDC_ALL_PATHS, "the DATABASE");
+        ReportPaths(sb, Ccd.QDC_DATABASE_CURRENT, "the DATABASE (current)");
+
+        Console.Write(sb.ToString());
+    }
+
+    private static void ReportPaths(StringBuilder sb, uint flags, string label)
+    {
+        var paths = Ccd.Query(flags, out var modes);
+        if (paths is null)
         {
-            if (Ccd.IsVirtual(p)) continue;
-
-            string path = Ccd.TargetPath(Ccd.PathAdapter(p), Ccd.PathTargetId(p));
-            if (!path.Contains("UGD1302", StringComparison.OrdinalIgnoreCase)) continue;
-
-            var (x, y) = Ccd.SourcePosition(modes, p);
-            // Alternate between a straight row and a stepped row, so
-            // the desktop's shape really changes between the rounds.
-            int nx = x + 100;
-            int ny = (round % 2 == 0) ? 0 : -1080;
-
-            Ccd.SetSourcePosition(modes, p, nx, ny);
-            Ccd.Apply(paths, modes);
-            moved = true;
-            break;
+            sb.AppendLine($"  {label}: the query failed.");
+            return;
         }
 
-        if (moved) Thread.Sleep(500);
+        int virtualCount = 0;
+        var lines = new List<string>();
+
+        for (int i = 0; i < paths.Length; i++)
+        {
+            var p = paths[i];
+            bool isVirtual = Ccd.IsVirtual(p);
+            if (isVirtual) virtualCount++;
+
+            string pos = "";
+            if (p.sourceInfo.modeInfoIdx != uint.MaxValue
+                && p.sourceInfo.modeInfoIdx < modes.Length)
+            {
+                var m = modes[p.sourceInfo.modeInfoIdx];
+                if (m.infoType == 1)
+                {
+                    pos = $" ({m.sourceMode.position.x},{m.sourceMode.position.y})";
+                }
+            }
+
+            lines.Add($"      [{i}] active={((p.flags & 0x1) != 0 ? "Y" : "N")}"
+                + $" adapter={p.targetInfo.adapterId} target={p.targetInfo.id}"
+                + $" source={p.sourceInfo.id}{pos}"
+                + (isVirtual ? "   <== THE VIRTUAL DISPLAY" : ""));
+        }
+
+        sb.AppendLine($"  {label}: {paths.Length} path(s), {virtualCount} of them virtual");
+        foreach (var line in lines) sb.AppendLine(line);
     }
 }

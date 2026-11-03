@@ -14,10 +14,37 @@ using RokidDiyStation.App.Spatial;
 
 namespace RokidDiyStation.Tools.ProbeVirtualDisplay;
 
-internal static class Ccd
+public static class Ccd
 {
-    internal const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
-    internal const uint QDC_DATABASE_CURRENT = 0x00000004;
+    public const uint QDC_ONLY_ACTIVE_PATHS = 0x00000002;
+    public const uint QDC_DATABASE_CURRENT = 0x00000004;
+    public const uint QDC_ALL_PATHS = 0x00000001;
+
+    /// <summary>
+    /// Query a specific flag set, with the modes.
+    /// </summary>
+    public static Path[]? Query(uint flags, out ModeInfo[] modes)
+    {
+        modes = Array.Empty<ModeInfo>();
+
+        var rc = GetDisplayConfigBufferSizes(flags, out var pathCount, out var modeCount);
+        if (rc != 0) return null;
+
+        var paths = new Path[pathCount];
+        var ms = new ModeInfo[modeCount];
+
+        uint topologyId = 0;
+        int result = (flags & QDC_DATABASE_CURRENT) != 0
+            ? QueryDisplayConfigWithTopology(flags, ref pathCount, paths, ref modeCount, ms, ref topologyId)
+            : QueryDisplayConfig(flags, ref pathCount, paths, ref modeCount, ms, IntPtr.Zero);
+
+        if (result != 0) return null;
+
+        Array.Resize(ref paths, (int)pathCount);
+        Array.Resize(ref ms, (int)modeCount);
+        modes = ms;
+        return paths;
+    }
 
     private const uint PATH_ACTIVE = 0x00000001;
 
@@ -30,7 +57,7 @@ internal static class Ccd
     };
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct LUID
+    public struct LUID
     {
         public uint LowPart;
         public int HighPart;
@@ -38,16 +65,16 @@ internal static class Ccd
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RATIONAL { public uint Numerator, Denominator; }
+    public struct RATIONAL { public uint Numerator, Denominator; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct POINTL { public int x, y; }
+    public struct POINTL { public int x, y; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct RECTL { public int Left, Top, Right, Bottom; }
+    public struct RECTL { public int Left, Top, Right, Bottom; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct VIDEO_SIGNAL_INFO
+    public struct VIDEO_SIGNAL_INFO
     {
         public ulong PixelRate;
         public RATIONAL hSyncFreq, vSyncFreq;
@@ -55,16 +82,16 @@ internal static class Ccd
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct TARGET_MODE { public VIDEO_SIGNAL_INFO targetVideoSignalInfo; }
+    public struct TARGET_MODE { public VIDEO_SIGNAL_INFO targetVideoSignalInfo; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct SOURCE_MODE { public uint Width, Height, PixelFormat; public POINTL position; }
+    public struct SOURCE_MODE { public uint Width, Height, PixelFormat; public POINTL position; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DESKTOP_IMAGE_INFO { public POINTL PathSourceSize; public RECTL DesktopImageRegion, DesktopImageClip; }
+    public struct DESKTOP_IMAGE_INFO { public POINTL PathSourceSize; public RECTL DesktopImageRegion, DesktopImageClip; }
 
     [StructLayout(LayoutKind.Explicit)]
-    internal struct ModeInfo
+    public struct ModeInfo
     {
         [FieldOffset(0)] public uint infoType;
         [FieldOffset(4)] public uint id;
@@ -75,10 +102,10 @@ internal static class Ccd
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct SourceInfo { public LUID adapterId; public uint id, modeInfoIdx, statusFlags; }
+    public struct SourceInfo { public LUID adapterId; public uint id, modeInfoIdx, statusFlags; }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct TargetInfo
+    public struct TargetInfo
     {
         public LUID adapterId;
         public uint id, modeInfoIdx, outputTechnology, rotation, scaling;
@@ -89,7 +116,7 @@ internal static class Ccd
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct Path
+    public struct Path
     {
         public SourceInfo sourceInfo;
         public TargetInfo targetInfo;
@@ -97,10 +124,10 @@ internal static class Ccd
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    internal struct DeviceInfoHeader { public uint type, size; public LUID adapterId; public uint id; }
+    public struct DeviceInfoHeader { public uint type, size; public LUID adapterId; public uint id; }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    internal struct TargetDeviceName
+    public struct TargetDeviceName
     {
         public DeviceInfoHeader header;
         public uint flags, outputTechnology;
@@ -128,18 +155,30 @@ internal static class Ccd
         [In] Path[] pathInfoArray, uint modeInfoArraySize,
         [In] ModeInfo[] modeInfoArray, uint flags);
 
+    /// <summary>
+    /// A raw SetDisplayConfig call, with an arbitrary flag set.
+    /// </summary>
+    /// <remarks>
+    /// The probe needs to try flag combinations the app does not use,
+    /// so it cannot go through the app's own Apply() helper - which
+    /// only ever tries its own list.
+    /// </remarks>
+    public static int SetDisplayConfigRaw(uint pathCount, Path[] paths,
+        uint modeCount, ModeInfo[] modes, uint flags)
+        => SetDisplayConfig(pathCount, paths, modeCount, modes, flags);
+
     [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
     private static extern int GetTargetDeviceInfo(ref TargetDeviceName request);
 
-    internal static LUID PathAdapter(Path p) => p.targetInfo.adapterId;
-    internal static uint PathTargetId(Path p) => p.targetInfo.id;
+    public static LUID PathAdapter(Path p) => p.targetInfo.adapterId;
+    public static uint PathTargetId(Path p) => p.targetInfo.id;
 
     /// <summary>
     /// Whether a target is the virtual display, using the APP's own
     /// identification code - so the probe exercises the production
     /// logic rather than a copy of it.
     /// </summary>
-    internal static bool IsVirtual(Path p)
+    public static bool IsVirtual(Path p)
     {
         var app = new DisplayConfigController.LUID
         {
@@ -149,7 +188,7 @@ internal static class Ccd
         return DisplayConfigController.IsVirtualTarget(app, p.targetInfo.id);
     }
 
-    internal static string TargetPath(LUID adapterId, uint id)
+    public static string TargetPath(LUID adapterId, uint id)
     {
         var req = new TargetDeviceName
         {
@@ -165,7 +204,7 @@ internal static class Ccd
         return req.monitorDevicePath ?? "";
     }
 
-    internal static string TargetFriendlyName(LUID adapterId, uint id)
+    public static string TargetFriendlyName(LUID adapterId, uint id)
     {
         var req = new TargetDeviceName
         {
@@ -181,7 +220,7 @@ internal static class Ccd
         return req.monitorFriendlyDeviceName ?? "";
     }
 
-    internal static Path[]? QueryActive(out ModeInfo[] modes)
+    public static Path[]? QueryActive(out ModeInfo[] modes)
     {
         modes = Array.Empty<ModeInfo>();
 
@@ -203,7 +242,7 @@ internal static class Ccd
     /// <summary>
     /// Apply a path set, trying the flag sets in turn.
     /// </summary>
-    internal static bool Apply(Path[] paths, ModeInfo[] modes)
+    public static bool Apply(Path[] paths, ModeInfo[] modes)
     {
         foreach (var flags in ApplyFlagSets)
         {
@@ -225,7 +264,7 @@ internal static class Ccd
     /// <summary>
     /// Write a position into a path's source mode.
     /// </summary>
-    internal static void SetSourcePosition(ModeInfo[] modes, Path path, int x, int y)
+    public static void SetSourcePosition(ModeInfo[] modes, Path path, int x, int y)
     {
         if (path.sourceInfo.modeInfoIdx == uint.MaxValue) return;
         if (path.sourceInfo.modeInfoIdx >= modes.Length) return;
@@ -240,7 +279,7 @@ internal static class Ccd
     /// <summary>
     /// A path's source mode position.
     /// </summary>
-    internal static (int X, int Y) SourcePosition(ModeInfo[] modes, Path path)
+    public static (int X, int Y) SourcePosition(ModeInfo[] modes, Path path)
     {
         if (path.sourceInfo.modeInfoIdx == uint.MaxValue) return (0, 0);
         if (path.sourceInfo.modeInfoIdx >= modes.Length) return (0, 0);
@@ -255,13 +294,13 @@ internal static class Ccd
     /// Attach the virtual display at the given position, using the
     /// app's own attach code.
     /// </summary>
-    internal static void AttachVirtual(int x, int y)
+    public static void AttachVirtual(int x, int y)
     {
         var ok = DisplayConfigController.Attach(x, y);
         Console.WriteLine($"  Attach({x},{y}) = {ok}");
     }
 
-    internal static void Dump(uint flags, string label)
+    public static void Dump(uint flags, string label)
     {
         var rc = GetDisplayConfigBufferSizes(flags, out var pathCount, out var modeCount);
         if (rc != 0)

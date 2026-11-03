@@ -36,6 +36,7 @@
 //
 //   "<hwnd>"     bring the settings window to the front
 //   "reload"     restart the app in place
+//   "quit"       close the spatial display and exit
 //
 // The reload command exists so that the reload can be driven from the
 // outside - by a script, by a diagnostic tool, or by a test - without
@@ -43,6 +44,12 @@
 // difficulty is in the INTERACTION between two processes, and an
 // interaction that can only be triggered by a mouse click cannot be
 // verified automatically.
+//
+// The quit command is here for the same reason, and for a specific
+// reason: the app's EXIT path has to take the virtual display off the
+// desktop, and that is the behaviour the user complained about.  A
+// kill - a Stop-Process, a crash - does NOT run the exit path, so a
+// test that kills the app is not testing the thing that has to work.
 using System.IO;
 using System.IO.Pipes;
 using System.Text;
@@ -91,6 +98,16 @@ public sealed class SingleInstance : IDisposable
     /// listener thread, because it has to touch WPF and the GPU.
     /// </remarks>
     public event Action? OnReloadRequested;
+
+    /// <summary>
+    /// Raised when the pipe asks the app to quit.
+    /// </summary>
+    /// <remarks>
+    /// The quit has to go through the same route as the tray menu's
+    /// "Quit", because that is the route that closes the spatial
+    /// display and gives the virtual display back.
+    /// </remarks>
+    public event Action? OnQuitRequested;
 
     public event Action<int>? OnShowRequested;
 
@@ -250,6 +267,12 @@ public sealed class SingleInstance : IDisposable
             return;
         }
 
+        if (string.Equals(command, QuitCommand, StringComparison.OrdinalIgnoreCase))
+        {
+            OnQuitRequested?.Invoke();
+            return;
+        }
+
         if (int.TryParse(command, out var hwnd))
         {
             OnShowRequested?.Invoke(hwnd);
@@ -264,6 +287,11 @@ public sealed class SingleInstance : IDisposable
     /// The pipe command that asks the running instance to reload.
     /// </summary>
     public const string ReloadCommand = "reload";
+
+    /// <summary>
+    /// The pipe command that asks the running instance to quit.
+    /// </summary>
+    public const string QuitCommand = "quit";
 
     /// <summary>Ask the running instance to show its window.  Returns true
     /// if a signal was delivered (i.e. another instance was already running).</summary>

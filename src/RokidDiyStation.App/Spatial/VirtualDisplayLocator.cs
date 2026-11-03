@@ -274,6 +274,34 @@ public static class VirtualDisplayLocator
     }
 
     /// <summary>
+    /// Enumerate every adapter, with its state and description.
+    /// </summary>
+    /// <remarks>
+    /// The adapter's StateFlags are the clearest signal of whether the
+    /// virtual display is attached to the desktop: a detached adapter
+    /// reports 0x0, an attached one reports 0x1 (DISPLAY_DEVICE_ATTACHED_TO_DESKTOP).
+    ///
+    /// The adapter's description is what identifies it as the virtual
+    /// one: "Virtual Display Driver", with the device id "Root\MttVDD".
+    /// </remarks>
+    public static IReadOnlyList<(string DeviceName, uint StateFlags, string Description)> EnumerateAdapters()
+    {
+        var results = new System.Collections.Generic.List<(string, uint, string)>();
+
+        var dd = new DisplayNative.DISPLAY_DEVICE
+        {
+            cb = Marshal.SizeOf<DisplayNative.DISPLAY_DEVICE>()
+        };
+
+        for (uint i = 0; EnumDisplayDevices(null, i, ref dd, 0); i++)
+        {
+            results.Add((dd.DeviceName ?? "", (uint)dd.StateFlags, dd.DeviceString ?? ""));
+        }
+
+        return results;
+    }
+
+    /// <summary>
     /// Find the virtual display.
     /// </summary>
     /// <remarks>

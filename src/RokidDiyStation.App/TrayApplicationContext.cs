@@ -338,6 +338,23 @@ public sealed class TrayApplicationContext
     }
 
     /// <summary>
+    /// Quit, from a request that arrived on another thread.
+    /// </summary>
+    /// <remarks>
+    /// The pipe's listener runs on a background thread, and
+    /// <see cref="Quit"/> closes WPF windows - which may only be
+    /// touched from the dispatcher's thread.  So the request is
+    /// marshalled across.
+    /// </remarks>
+    public void RequestQuit()
+    {
+        void DoQuit() => Quit();
+
+        if (_mainWindow.Dispatcher.CheckAccess()) DoQuit();
+        else _mainWindow.Dispatcher.BeginInvoke(new Action(DoQuit));
+    }
+
+    /// <summary>
     /// Bring the OS cursor back onto the physical desktop.
     /// </summary>
     /// <remarks>

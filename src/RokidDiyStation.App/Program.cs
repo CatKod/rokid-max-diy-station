@@ -70,6 +70,17 @@ internal static class Program
         // triggered by a mouse click cannot be checked automatically.
         single.OnReloadRequested += () => tray.RequestReload();
 
+        // The same reasoning applies to the quit: the app's EXIT path
+        // has to take the virtual display off the desktop, and that
+        // path can only be exercised if something can ask for it from
+        // the outside.  A kill does not run it.
+        //
+        // It has to be marshalled onto the dispatcher, because the
+        // pipe's listener is a background thread and Quit() closes
+        // WPF windows - which may only be touched from the
+        // dispatcher's thread.
+        single.OnQuitRequested += () => tray.RequestQuit();
+
         // The single-instance mutex is released EXPLICITLY on the way
         // out, not left to the garbage collector.
         //

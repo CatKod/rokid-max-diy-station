@@ -417,18 +417,47 @@ public sealed class SpatialStation : IDisposable
     /// </remarks>
     public bool CloseSpatialDisplay()
     {
-        // The desired state is recorded FIRST.  Windows rebuilds the
-        // topology when a monitor is plugged or unplugged, and the
-        // rebuild brings the virtual display back - because the
-        // database still records it as active.  Recording the intent
-        // first means the topology watcher knows what to put right.
+        // THE DESIRED STATE IS RECORDED FIRST, AND THE WATCHER IS
+        // UNHOOKED BEFORE THE DETACH.
+        //
+        // The detach itself provokes a WM_DISPLAYCHANGE.  If the
+        // topology watcher were still hooked up when that message
+        // arrived, it would look at the display, find it missing, and
+        // - because the intent flag had just been cleared to false -
+        // try to detach it again.  That second detach would race the
+        // first one, and both would report a failure.
+        //
+        // Worse, the re-attach direction of the watcher is the
+        // dangerous one: a message that arrives while the intent flag
+        // is still true puts the virtual display BACK, and the detach
+        // that follows then has to remove it again.  Unhooking the
+        // watcher for the duration of the close removes the whole
+        // class of race.
+        //
+        // The flag is cleared first, so even a message that was
+        // already queued sees "the display should not be there".
         _virtualDisplayShouldBeOpen = false;
 
         // The barrier goes first, so the cursor is free while the
         // display is being torn down.
         UninstallMouseBarrier();
 
-        var ok = VirtualDisplayController.Close();
+        // The watcher is unhooked for the duration of the detach.
+        PanelRenderer.DisplayChanged -= OnTopologyChanged;
+
+        bool ok;
+        try
+        {
+            ok = VirtualDisplayController.Close();
+        }
+        finally
+        {
+            // It goes back on afterwards, so a later topology change
+            // is still reconciled - with the intent flag now saying
+            // the display must NOT be there.
+            if (_running) PanelRenderer.DisplayChanged += OnTopologyChanged;
+        }
+
         if (!ok)
         {
             // There is deliberately NO legacy fallback here.

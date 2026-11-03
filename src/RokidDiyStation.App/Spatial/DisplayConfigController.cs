@@ -161,25 +161,85 @@ public static class DisplayConfigController
     private const uint SDC_ALLOW_PATH_ORDER_CHANGES = 0x00002000;
 
     /// <summary>
+    /// Write the new arrangement into Windows' persistent display
+    /// configuration database.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THIS FLAG IS THE ONE THAT ACTUALLY FIXED THE USER'S BUG.
+    /// </para>
+    /// <para>
+    /// The detach used to be applied WITHOUT it, on the reasoning that
+    /// a session-only change is reversible and leaves the user's
+    /// display settings alone.  The first half is true and the second
+    /// half is true, but they come at a price that was not
+    /// understood: <b>Windows rebuilds the desktop layout FROM THE
+    /// DATABASE</b> whenever the topology changes.
+    /// </para>
+    /// <para>
+    /// So with a session-only detach, the database still records the
+    /// virtual display as part of the active topology, and the next
+    /// re-layout - plugging the Rokid Max in, unplugging a monitor,
+    /// changing a resolution - puts it BACK, at whatever position the
+    /// database remembers.  That is the user's symptom exactly: the
+    /// VDD reappears in Extended mode, displaced upwards or to the
+    /// left.
+    /// </para>
+    /// <para>
+    /// AND THE POSITION WAS NOT A GUESS.  The user's machine carried
+    /// it in the registry:
+    /// <c>HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration</c>,
+    /// in the composite key for the connected topology, under the
+    /// virtual display's subkey: <c>Position.cx = 1915</c> and
+    /// <c>Position.cy = 4294966216</c>.  Read as a signed 32-bit
+    /// integer that is <c>-1080</c>, so the stored position was
+    /// (1915, -1080) - above the physical monitors and shifted
+    /// sideways.  Exactly what the user described.
+    /// </para>
+    /// <para>
+    /// With SDC_SAVE_TO_DATABASE the session and the database agree,
+    /// and Windows stops rebuilding the desktop against the app's
+    /// back.
+    /// </para>
+    /// <para>
+    /// The attach uses it too, so the database always records the
+    /// arrangement that is actually on screen.  That is what makes the
+    /// lifecycle reversible: the attach and the detach are the same
+    /// operation on the same persistent state.
+    /// </para>
+    /// <para>
+    /// It also ends the fight loop the app's log shows - the attach
+    /// that did not stick, the display vanishing again a second
+    /// later, and the reconciler putting it back.  That loop was the
+    /// same disagreement seen from the other side: the session said
+    /// the display was there, the database did not, and every topology
+    /// rebuild settled the argument in the database's favour.
+    /// </para>
+    /// </remarks>
+    private const uint SDC_SAVE_TO_DATABASE = 0x00000200;
+
+    /// <summary>
     /// The flag sets the apply is tried with, in order.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The first set - the one with SDC_ALLOW_PATH_ORDER_CHANGES - is
     /// rejected with 87 when a path is added that was not in the
-    /// previous topology.  The set that VALIDATES is the set that is
-    /// applied, so the two can never disagree.
-    ///
-    /// SDC_SAVE_TO_DATABASE is deliberately NOT used.  Without it the
-    /// new arrangement lives only in the session, which is what makes
-    /// the detach reversible and keeps the virtual display out of the
-    /// user's display settings.
+    /// previous topology.  The SDK requires SDC_TOPOLOGY_SUPPLIED with
+    /// that flag, and the flag set that VALIDATES is the flag set that
+    /// is applied, so the two can never disagree.
+    /// </para>
+    /// <para>
+    /// Every set carries SDC_SAVE_TO_DATABASE, for the reason given
+    /// on that constant.
+    /// </para>
     /// </remarks>
     private static readonly uint[] ApplyFlagSets =
     {
-        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_ALLOW_PATH_ORDER_CHANGES,
-        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES,
-        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG,
-        SDC_APPLY,
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_ALLOW_PATH_ORDER_CHANGES | SDC_SAVE_TO_DATABASE,
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_ALLOW_CHANGES | SDC_SAVE_TO_DATABASE,
+        SDC_APPLY | SDC_USE_SUPPLIED_DISPLAY_CONFIG | SDC_SAVE_TO_DATABASE,
+        SDC_APPLY | SDC_SAVE_TO_DATABASE,
     };
 
     // -----------------------------------------------------------------
@@ -654,8 +714,17 @@ public static class DisplayConfigController
             // desktop by accident.
             if ((p.flags & PATH_ACTIVE) == 0) continue;
 
-            // A path that is already virtual is not carried over: it
-            // is re-added below, at the requested position.
+            // EVERY path that is already virtual is not carried
+            // over: exactly ONE virtual path is added back below, at
+            // the requested position.
+            //
+            // The old code dropped only the first virtual path it
+            // met, so a virtual target that had TWO active paths -
+            // which is what the IddCx driver leaves behind when it
+            // re-publishes its monitor after a topology change - kept
+            // its second path.  The display was then on the desktop
+            // TWICE, and a later detach that removed one copy still
+            // left the other one there.
             if (IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id)) continue;
 
             paths.Add(p);
@@ -795,6 +864,206 @@ public static class DisplayConfigController
     /// <returns>True when the path was removed.</returns>
     public static bool Detach()
     {
+        // The actual removal.
+        //
+        // The three outcomes are DISTINGUISHED, because they mean
+        // different things to the caller:
+        //
+        //   * removed    - the display was on the desktop and is now
+        //                  off it;
+        //   * already    - the display was not on the desktop, so the
+        //                  caller's intent is already satisfied;
+        //   * failed     - the topology could not even be queried, so
+        //                  nothing is known and nothing was done.
+        //
+        // The old code lumped "already" and "failed" together and
+        // returned false for both, and the caller turned that into
+        // "The virtual display could not be detached."  That message
+        // is wrong for the "already" case: the virtual display WAS
+        // detached.  It is already off the desktop.  The detach is
+        // simply idempotent, and saying so is what a caller needs to
+        // know, because it means the caller's intent - "the virtual
+        // display must not be on the desktop" - is satisfied.
+        //
+        // It also matters for the RACE: the topology watcher can call
+        // Detach() again after the desktop has already been rebuilt,
+        // and a false "failure" there would be logged as a real error
+        // on every monitor hotplug.
+        var outcome = RemoveVirtualPaths();
+
+        if (outcome == DetachOutcome.Failed)
+        {
+            Log("Detach: the display topology could not be queried.");
+            return false;
+        }
+
+        if (outcome == DetachOutcome.AlreadyDetached)
+        {
+            Log("Detach: the virtual display is already off the desktop.");
+            return true;
+        }
+
+        // The removal was applied.  Now it has to STAY removed.
+        //
+        // SetDisplayConfig returns as soon as the configuration has
+        // been accepted, and DWM's swapchain teardown for the virtual
+        // adapter happens on its own schedule after that.  A single
+        // check right after the apply can therefore see the display
+        // still active, or - worse - see it gone and then watch it
+        // come back a moment later, because Windows rebuilt the
+        // topology from the database.
+        //
+        // So the state is checked over a settle window, and the
+        // detach is only reported as successful if the display stays
+        // gone for the whole window.
+        if (!WaitForVirtualGone(SettleWindowMs))
+        {
+            Log("Detach: the virtual display came back after it was removed.");
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// How a detach attempt ended.
+    /// </summary>
+    private enum DetachOutcome
+    {
+        /// <summary>The topology could not be queried at all.</summary>
+        Failed,
+
+        /// <summary>The virtual display was not on the desktop.</summary>
+        AlreadyDetached,
+
+        /// <summary>The virtual display was disconnected.</summary>
+        Removed,
+    }
+
+    /// <summary>
+    /// How long the virtual display is watched after a detach, in ms.
+    /// </summary>
+    /// <remarks>
+    /// This is long enough to cover DWM's swapchain teardown and one
+    /// round of Windows' own topology rebuild, which is what used to
+    /// put the display back.
+    /// </remarks>
+    private const int SettleWindowMs = 1500;
+
+    /// <summary>
+    /// How long the display is given to actually leave the topology
+    /// before the settle watch starts judging it, in ms.
+    /// </summary>
+    /// <remarks>
+    /// SetDisplayConfig returns once the configuration has been
+    /// accepted, and the topology query can still report the old
+    /// path for a moment afterwards.  Failing on that first sighting
+    /// would be a false negative, so the watch does not judge the
+    /// display until it has had this long to go.
+    /// </remarks>
+    private const int SettleGraceMs = 400;
+
+    /// <summary>
+    /// How often the state is polled during the settle window, in ms.
+    /// </summary>
+    private const int SettlePollMs = 100;
+
+    /// <summary>
+    /// Watch the virtual display and report whether it STAYS off the
+    /// desktop for the whole window.
+    /// </summary>
+    /// <remarks>
+    /// A single check is not enough.  The failure mode the user
+    /// reported - the virtual display reappearing in Extended mode,
+    /// displaced upwards or to the left - is a RE-ATTACH, and the
+    /// re-attach happens after the removal, not instead of it.  So
+    /// the check has to keep watching for long enough to see the
+    /// re-attach if it is going to happen.
+    /// </remarks>
+    private static bool WaitForVirtualGone(int windowMs)
+    {
+        var start = Environment.TickCount64;
+        var deadline = start + windowMs;
+
+        while (Environment.TickCount64 < deadline)
+        {
+            bool present = IsVirtualActive();
+
+            if (present && Environment.TickCount64 - start > SettleGraceMs)
+                return false;
+
+            Thread.Sleep(SettlePollMs);
+        }
+
+        return !IsVirtualActive();
+    }
+
+    /// <summary>
+    /// Remove every virtual display path from the desktop.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// THE MECHANISM: AN EXPLICIT "DISCONNECT", NOT AN OMISSION
+    /// </para>
+    /// <para>
+    /// The virtual display's path is KEPT in the array that is sent
+    /// to Windows, with its <c>flags</c> cleared - so
+    /// <c>DISPLAYCONFIG_PATH_ACTIVE</c> is no longer set - and with
+    /// its two mode indices set to
+    /// <c>DISPLAYCONFIG_PATH_MODE_IDX_INVALID</c> (0xFFFFFFFF).
+    /// </para>
+    /// <para>
+    /// This is EXACTLY what the Windows Display Settings app does
+    /// when the user turns a display off, and it is the difference
+    /// between the two things that can be done to a path:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// OMITTING the path says: "I am not telling you about this
+    /// display."  Windows then has a CONNECTED target that the
+    /// supplied configuration does not account for, so it falls back
+    /// to its own database - and the database still says the virtual
+    /// display is active, because the historical detach never
+    /// persisted anything.  So the display comes back.
+    /// </description></item>
+    /// <item><description>
+    /// DISCONNECTING the path says: "This display is connected, and
+    /// the user has turned it off."  Windows records that, and it
+    /// does not auto-extend onto the display again.
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// THE REGISTRY IS THE PROOF
+    /// </para>
+    /// <para>
+    /// The user's own machine carried the smoking gun in
+    /// <c>HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers\Configuration</c>:
+    /// stale composite keys whose <c>\02</c> subkey held
+    /// <c>Position.cx = 1915</c> and <c>Position.cy = 4294966216</c>.
+    /// Read as a signed 32-bit integer, that is <c>-1080</c>: the
+    /// virtual display at (1915, -1080), which is ABOVE the physical
+    /// monitors and shifted sideways.  That is precisely the
+    /// "repositioned upward or to the left" the user reported, and it
+    /// was sitting in the registry, waiting to be restored by the
+    /// next topology rebuild.
+    /// </para>
+    /// <para>
+    /// With <c>SDC_SAVE_TO_DATABASE</c> the detach overwrites that
+    /// key, so the stale position is gone rather than waiting.
+    /// </para>
+    /// <para>
+    /// EVERY virtual path is handled, not just the first one found.
+    /// The IddCx driver re-publishes its monitor when the topology
+    /// changes, and Windows can be left with two active paths for the
+    /// same virtual target.  Disconnecting only the first left the
+    /// second one on the desktop while the code reported success.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// What the attempt did.
+    /// </returns>
+    private static DetachOutcome RemoveVirtualPaths()
+    {
         // The ACTIVE paths are the ones on the desktop.  The query is
         // retried with the database if the active query fails, because
         // a machine that has just had a monitor unplugged can answer
@@ -803,11 +1072,10 @@ public static class DisplayConfigController
         if (active is null)
         {
             Log("Detach: the display topology could not be queried at all.");
-            return false;
+            return DetachOutcome.Failed;
         }
 
-        var kept = new List<DISPLAYCONFIG_PATH_INFO>();
-        var keptModes = new List<DISPLAYCONFIG_MODE_INFO>();
+        var paths = new List<DISPLAYCONFIG_PATH_INFO>();
         bool removed = false;
 
         // The modes the surviving paths refer to have to be carried
@@ -820,28 +1088,57 @@ public static class DisplayConfigController
         // code sent the whole mode array back unchanged, so it
         // happened to work when the indices lined up, and the indices
         // stop lining up when Windows rebuilds the topology.
-        var modeIndex = new Dictionary<(uint, uint, uint), uint>();
 
         foreach (var p in active.Paths)
         {
             if (IsVirtualTarget(p.targetInfo.adapterId, p.targetInfo.id))
             {
-                removed = true;
+                // EVERY virtual path is disconnected, not just the
+                // first one.  The IddCx driver re-publishes its
+                // monitor when the topology changes, and Windows can
+                // be left with two active paths for the same virtual
+                // target - the old one and the new one.  Disconnecting
+                // only the first kept the second, and the virtual
+                // display stayed on the desktop in Extended mode while
+                // the code reported success.
+                var disconnected = p;
+
+                // THE DISCONNECT.  Clearing PATH_ACTIVE is what takes
+                // the display off the desktop; the invalid mode
+                // indices say "this path has no mode", which is what
+                // the Windows Display Settings app sends, and what
+                // Windows expects for a path that is not in use.
+                disconnected.flags &= ~PATH_ACTIVE;
+                disconnected.sourceInfo.modeInfoIdx = uint.MaxValue;
+                disconnected.targetInfo.modeInfoIdx = uint.MaxValue;
+
+                paths.Add(disconnected);
+
+                // Only an ACTIVE virtual path counts as "removed": the
+                // database keeps the path of a display that is off the
+                // desktop, and counting that one would make the
+                // detach claim to have done something when it had
+                // not.
+                if ((p.flags & PATH_ACTIVE) != 0) removed = true;
                 continue;
             }
 
-            if ((p.flags & PATH_ACTIVE) == 0) continue;
-            kept.Add(p);
+            paths.Add(p);
         }
 
         if (!removed)
         {
             Log("Detach: no active virtual display path was found in the topology.");
-            return false;
+            return DetachOutcome.AlreadyDetached;
         }
 
         // Rebuild the mode array so that it contains exactly the modes
-        // the surviving paths refer to, and remap their indices.
+        // the ACTIVE paths refer to, and remap their indices.
+        //
+        // The DISCONNECTED virtual path refers to no modes at all - its
+        // mode indices are DISPLAYCONFIG_PATH_MODE_IDX_INVALID - so it
+        // contributes nothing to the mode array.  That is correct: an
+        // inactive path has no mode.
         //
         // THE ORDER OF THE MODE ARRAY MATTERS.
         //
@@ -857,8 +1154,9 @@ public static class DisplayConfigController
         // refer to.  That preserves both the relative order and the
         // target-before-source pairing that Windows expects.
         var wanted = new HashSet<uint>();
-        foreach (var p in kept)
+        foreach (var p in paths)
         {
+            if ((p.flags & PATH_ACTIVE) == 0) continue;
             if (p.sourceInfo.modeInfoIdx != uint.MaxValue) wanted.Add(p.sourceInfo.modeInfoIdx);
             if (p.targetInfo.modeInfoIdx != uint.MaxValue) wanted.Add(p.targetInfo.modeInfoIdx);
         }
@@ -873,16 +1171,17 @@ public static class DisplayConfigController
             modes.Add(active.Modes[m]);
         }
 
-        for (int i = 0; i < kept.Count; i++)
+        for (int i = 0; i < paths.Count; i++)
         {
-            var p = kept[i];
+            var p = paths[i];
+            if ((p.flags & PATH_ACTIVE) == 0) continue;
             if (p.sourceInfo.modeInfoIdx != uint.MaxValue
                 && remap.TryGetValue(p.sourceInfo.modeInfoIdx, out var sIdx))
                 p.sourceInfo.modeInfoIdx = sIdx;
             if (p.targetInfo.modeInfoIdx != uint.MaxValue
                 && remap.TryGetValue(p.targetInfo.modeInfoIdx, out var tIdx))
                 p.targetInfo.modeInfoIdx = tIdx;
-            kept[i] = p;
+            paths[i] = p;
         }
 
         // THE TWO VIEWS OF THE TOPOLOGY DISAGREE, AND THAT IS THE
@@ -915,14 +1214,15 @@ public static class DisplayConfigController
         // The mode array has to describe the positions as well as the
         // sizes, because SetDisplayConfig reads the position out of
         // the SOURCE MODE, not out of the path.
-        for (int i = 0; i < kept.Count; i++)
+        for (int i = 0; i < paths.Count; i++)
         {
-            var p = kept[i];
-            var (x, y) = SourcePosition(positionSource.Modes, p);
+            var p = paths[i];
+            if ((p.flags & PATH_ACTIVE) == 0) continue;
+            var (x, y) = SourcePositionOf(positionSource.Modes, p);
             SetSourcePosition(modes, p, x, y);
         }
 
-        if (Apply(kept, modes)) return !IsVirtualActive();
+        if (Apply(paths, modes)) return DetachOutcome.Removed;
 
         // SECOND ATTEMPT: pack the survivors from the origin, so that
         // no two of them overlap.
@@ -941,16 +1241,17 @@ public static class DisplayConfigController
         var packedModes = new List<DISPLAYCONFIG_MODE_INFO>(modes);
 
         int cursorX = 0;
-        foreach (var p in kept)
+        foreach (var p in paths)
         {
-            var (w, _) = SourceSize(positionSource.Modes, p);
+            if ((p.flags & PATH_ACTIVE) == 0) continue;
+            var (w, _) = SourceSizeOf(positionSource.Modes, p);
             SetSourcePosition(packedModes, p, cursorX, 0);
             cursorX += w;
         }
 
         Log("Detach: the first attempt was refused; retrying with the survivors packed "
             + "from the origin.");
-        if (Apply(kept, packedModes)) return !IsVirtualActive();
+        if (Apply(paths, packedModes)) return DetachOutcome.Removed;
 
         // THIRD ATTEMPT: the packed layout, with the paths REBUILT.
         //
@@ -960,10 +1261,23 @@ public static class DisplayConfigController
         // fine.  Clearing those flags and marking the targets as
         // available is what the ATTACH does for the virtual display's
         // path, and it is what makes the difference here.
-        var rebuilt = new List<DISPLAYCONFIG_PATH_INFO>(kept.Count);
-        for (int i = 0; i < kept.Count; i++)
+        var rebuilt = new List<DISPLAYCONFIG_PATH_INFO>(paths.Count);
+        for (int i = 0; i < paths.Count; i++)
         {
-            var p = kept[i];
+            var p = paths[i];
+            if ((p.flags & PATH_ACTIVE) == 0)
+            {
+                // The disconnected path keeps its disconnect: the
+                // flags stay cleared and the mode indices stay
+                // invalid.  Only the target's availability is
+                // restored, so that Windows does not treat the
+                // display as unplugged and re-publish it.
+                p.targetInfo.targetAvailable = 1;
+                p.targetInfo.statusFlags = 0;
+                rebuilt.Add(p);
+                continue;
+            }
+
             p.sourceInfo.statusFlags = 0;
             p.targetInfo.targetAvailable = 1;
             p.targetInfo.statusFlags = 0;
@@ -972,9 +1286,71 @@ public static class DisplayConfigController
         }
 
         Log("Detach: the packed attempt was refused; retrying with rebuilt paths.");
-        if (Apply(rebuilt, packedModes)) return !IsVirtualActive();
+        if (Apply(rebuilt, packedModes)) return DetachOutcome.Removed;
 
-        return false;
+        return DetachOutcome.Failed;
+    }
+
+    /// <summary>
+    /// A path's source mode position, matched BY IDENTITY rather than
+    /// by index.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The index cannot be used here.  A path's
+    /// <c>sourceInfo.modeInfoIdx</c> is an index into the mode array
+    /// of the query that PRODUCED the path, so it means nothing in
+    /// another query's mode array.
+    /// </para>
+    /// <para>
+    /// That is not a theoretical concern.  The active query and the
+    /// database query return the same paths with DIFFERENT mode
+    /// arrays, and the indices differ - which is exactly why the
+    /// positions the detach sent were the ones Windows had already
+    /// refused, and why every SetDisplayConfig call answered 87.
+    /// </para>
+    /// <para>
+    /// The source mode is therefore found by its adapter and id, which
+    /// are stable across queries.
+    /// </para>
+    /// </remarks>
+    private static (int X, int Y) SourcePositionOf(
+        DISPLAYCONFIG_MODE_INFO[] modes, DISPLAYCONFIG_PATH_INFO path)
+    {
+        for (int m = 0; m < modes.Length; m++)
+        {
+            var mode = modes[m];
+            if (mode.infoType != MODE_INFO_TYPE_SOURCE) continue;
+            if (!mode.adapterId.SameAs(path.sourceInfo.adapterId)) continue;
+            if (mode.id != path.sourceInfo.id) continue;
+            return (mode.sourceMode.position.x, mode.sourceMode.position.y);
+        }
+
+        return (0, 0);
+    }
+
+    /// <summary>
+    /// A path's source mode size, matched BY IDENTITY rather than by
+    /// index.
+    /// </summary>
+    /// <remarks>
+    /// The same reason as <see cref="SourcePositionOf"/>: the index
+    /// belongs to the query that produced the path, not to the mode
+    /// array being searched.
+    /// </remarks>
+    private static (int Width, int Height) SourceSizeOf(
+        DISPLAYCONFIG_MODE_INFO[] modes, DISPLAYCONFIG_PATH_INFO path)
+    {
+        for (int m = 0; m < modes.Length; m++)
+        {
+            var mode = modes[m];
+            if (mode.infoType != MODE_INFO_TYPE_SOURCE) continue;
+            if (!mode.adapterId.SameAs(path.sourceInfo.adapterId)) continue;
+            if (mode.id != path.sourceInfo.id) continue;
+            return ((int)mode.sourceMode.Width, (int)mode.sourceMode.Height);
+        }
+
+        return (1920, 1080);
     }
 
     /// <summary>
