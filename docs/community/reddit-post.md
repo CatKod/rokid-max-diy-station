@@ -9,7 +9,7 @@ So I built my own.
 ---
 
 **Repo:** https://github.com/CatKod/rokid-max-diy-station
-**Download (single .exe, no .NET install needed):** https://github.com/CatKod/rokid-max-diy-station/releases/tag/v0.2.0
+**Download (single .exe, no .NET install needed):** https://github.com/CatKod/rokid-max-diy-station/releases/tag/v0.3.0
 
 ---
 
@@ -21,9 +21,10 @@ Concretely:
 
 - Reads the onboard IMU (gyro + accel + magnetometer) over USB HID — VID 0x04D2 / PID 0x162F, report ID 0x11, 64-byte packets at ~436 Hz — and fuses it into a stable 3DoF head pose with a Mahony filter
 - Renders the panel as a 3D quad on the glasses' Micro-OLED using D3D11, a flip-model swapchain, and HLSL shaders, anchored to the world via the IMU
+- The panel's size is adjustable from **25 % to 100 %** of the field of view, applied live — it grows and shrinks *in place*, keeping its position in the room
 - Draws a 3D mouse cursor in the scene, adjustable from 0.25× to 4.0×, applied live
 - Works with **any** Windows app, not just Chromium-based ones
-- Runs in the system tray with optional autostart
+- Runs in the system tray with optional autostart, and has a **reload** action for when it gets into a bad state
 - Also emits the head pose as a FreeTrack-compatible UDP stream, so OpenTrack / flight sims / space sims can use the glasses as a head tracker
 
 ## How it actually works (the interesting part)
@@ -38,9 +39,11 @@ The fix was to stop faking it entirely:
 
 **3. The cursor is pure feedback.** Because the OS handles all the input, the app just reads `GetCursorInfo()`, maps it into the monitor's UV space, and draws the 3D cursor. It's a plain affine transform — no gain, no drift — because the virtual monitor's pixel grid *is* the content's pixel grid.
 
+**4. The panel's size is angular, not metric.** The slider sets what fraction of the glasses' field of view the panel covers (25 %–100 %). Because the width is computed from the *angle* and the distance, moving the panel further away doesn't change how big it looks — only how far away it is. And because the mouse cursor is sized as a fraction of the *panel's width* rather than as a fixed size in metres, the two settings don't silently undo each other. Both of those were wrong in the first version, and both were only visible once you could actually move the slider.
+
 The whole CDP stack was deleted. ~2,000 lines became ~80. And every application works.
 
-Written in C# / .NET 8 — WPF tray shell, D3D11 renderer, Windows Graphics Capture for the display feed, HidSharp for USB HID. 218 tests passing.
+Written in C# / .NET 8 — WPF tray shell, D3D11 renderer, Windows Graphics Capture for the display feed, HidSharp for USB HID. 296 tests passing.
 
 ## Screenshots
 

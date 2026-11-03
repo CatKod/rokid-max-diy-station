@@ -120,7 +120,7 @@ Download `RokidDiyStation.exe` from the
 [latest release](https://github.com/CatKod/rokid-max-diy-station/releases/latest).
 
 It is **self-contained** — no .NET runtime installation needed. It is a
-single file of roughly 180 MB.
+single file of roughly 80 MB.
 
 ### 2. Install the virtual display driver
 
