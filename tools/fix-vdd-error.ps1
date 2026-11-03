@@ -99,15 +99,70 @@ if ($dev) {
 
 Log ''
 Log '=== 4. waiting for the device to start ==='
+$started = $false
 for ($i = 0; $i -lt 45; $i++) {
     $dev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
            Where-Object { $_.FriendlyName -like '*Virtual Display*' }
     if ($dev -and $dev.Status -eq 'OK') {
         Log "  the device is Started (after $($i + 1) s)"
+        $started = $true
         break
     }
     if ($i -eq 44) { Log "  the device did NOT start: $($dev.Status)" }
     Start-Sleep -Seconds 1
+}
+
+# A plain restart is not always enough: the MttVDD adapter can stay in
+# error code 43 across a restart, because the stuck state lives in the
+# driver's own device object rather than in the PnP node.  Removing the
+# device node and re-installing the INF rebuilds that object, which is
+# what actually clears the 43.
+if (-not $started) {
+    Log ''
+    Log '=== 4b. the restart did not clear the error - re-installing the driver ==='
+    $dev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
+           Where-Object { $_.FriendlyName -like '*Virtual Display*' }
+    if ($dev) {
+        Log "  removing $($dev.InstanceId)"
+        if (Test-Path $devcon) {
+            & $devcon remove $dev.InstanceId 2>&1 |
+                ForEach-Object { $_.ToString().Trim() } |
+                Where-Object { $_ -ne '' } |
+                ForEach-Object { Log "    $_" }
+        } else {
+            pnputil /remove-device $dev.InstanceId 2>&1 |
+                ForEach-Object { $_.ToString().Trim() } |
+                Where-Object { $_ -ne '' } |
+                ForEach-Object { Log "    $_" }
+        }
+        Start-Sleep -Seconds 3
+    }
+
+    Log '  installing the driver again'
+    if (Test-Path $devcon) {
+        & $devcon install $inf 'Root\MttVDD' 2>&1 |
+            ForEach-Object { $_.ToString().Trim() } |
+            Where-Object { $_ -ne '' } |
+            ForEach-Object { Log "    $_" }
+    } else {
+        pnputil /add-driver $inf /install 2>&1 |
+            ForEach-Object { $_.ToString().Trim() } |
+            Where-Object { $_ -ne '' } |
+            ForEach-Object { Log "    $_" }
+    }
+
+    Log '  waiting for the device to come back'
+    for ($i = 0; $i -lt 45; $i++) {
+        $dev = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
+               Where-Object { $_.FriendlyName -like '*Virtual Display*' }
+        if ($dev -and $dev.Status -eq 'OK') {
+            Log "  the device is Started (after $($i + 1) s)"
+            $started = $true
+            break
+        }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $started) { Log '  the device STILL did not start' }
 }
 
 Log ''
@@ -116,7 +171,20 @@ Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
     ForEach-Object { Log ("  {0,-30} {1,-12} {2}" -f $_.FriendlyName, $_.Status, $_.InstanceId) }
 
 Log ''
-Log '=== 6. the driver log ==='
+Log '=== 6. the CCD topology (can the app read it?) ==='
+# The app attaches and detaches the virtual display through the
+# display-configuration API.  If that API cannot describe the topology
+# on this machine, the spatial display cannot be opened at all - so
+# this is checked here, right after the repair.
+$probe = Join-Path $repo 'tools\ProbeCcdState\bin\Release\net8.0-windows10.0.26100.0\ProbeCcdState.exe'
+if (Test-Path $probe) {
+    & $probe 2>&1 | ForEach-Object { Log "  $_" }
+} else {
+    Log '  the probe is not built - skipping'
+}
+
+Log ''
+Log '=== 7. the driver log ==='
 $log = Get-ChildItem 'C:\VirtualDisplayDriver\Logs\*.txt' -ErrorAction SilentlyContinue |
        Sort-Object LastWriteTime -Descending | Select-Object -First 1
 if ($log) {
