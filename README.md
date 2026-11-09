@@ -152,6 +152,14 @@ where the settings file has to live).
    off to the **left** of your primary screen, at negative coordinates.
 5. Put the glasses on. The panel is there, in the room.
 
+> **The glasses must be plugged in before the app starts.** The app checks
+> for them first and refuses to start if they are missing, rather than
+> sitting in the tray doing nothing. If it does, you will see a message
+> asking you to connect the Rokid Max — and the virtual display is
+> taken off your desktop on the way out, so a previous session that
+> crashed cannot leave a stray monitor behind. See
+> [docs/M16-STARTUP-GATE.md](docs/M16-STARTUP-GATE.md).
+
 ---
 
 ## 🎮 Hotkeys
@@ -325,8 +333,8 @@ rokid-max-diy-station/
 │   ├── RokidDiyStation.Core/         # IMU, fusion, anchor maths, protocols (no UI)
 │   └── RokidDiyStation.Cli/          # headless testing tool
 ├── tests/
-│   ├── RokidDiyStation.Core.Tests/   # 145 tests
-│   └── RokidDiyStation.App.Tests/    # 73 tests
+│   ├── RokidDiyStation.Core.Tests/   # 208 tests
+│   └── RokidDiyStation.App.Tests/    # 137 tests
 ├── tools/                            # probes and verification tools (20 of them)
 ├── drivers/                          # USB IDs / HID descriptor notes
 ├── docs/                             # milestone and protocol documents

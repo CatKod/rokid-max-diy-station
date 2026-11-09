@@ -62,7 +62,7 @@ driver reads; keep it valid XML.
 ### Build and test
 
 ```powershell
-dotnet test -c Release          # 333 tests
+dotnet test -c Release          # 345 tests
 
 # The fast build: a folder.  `artifacts\release\RokidDiyStation.exe`
 # runs from there.  Good enough for testing on this machine.

@@ -4,6 +4,7 @@
 //
 //   * WPF Application owns the message pump
 //   * SingleInstance mutex prevents a second copy
+//   * StartupPreflight is the gate: the glasses have to be plugged in
 //   * SettingsService loads / persists JSON under %APPDATA%
 //   * TrackingService runs the HID + UDP pipeline on a background thread
 //   * TrayApplicationContext owns the H.NotifyIcon TaskbarIcon and the
@@ -36,6 +37,27 @@ internal static class Program
             return 0;
         }
 
+        // "--preflight" runs ONLY the startup gate and reports the
+        // result on the console.
+        //
+        // The gate's whole job is to decide whether the app runs, and
+        // that decision has to be verifiable without a mouse click and
+        // without a modal dialog blocking the script.  This flag is
+        // that window: it exercises the real hardware probe and the
+        // real virtual-display cleanup, prints the outcome, and
+        // exits.
+        if (args.Contains("--preflight"))
+        {
+            var probe = StartupPreflight.Evaluate(args.Contains("--no-device"));
+            Console.WriteLine($"can_start={probe.CanStart}");
+            Console.WriteLine($"title={probe.Title}");
+            Console.WriteLine("message:");
+            Console.WriteLine(probe.Message);
+            Console.WriteLine("detail:");
+            Console.WriteLine(probe.Detail);
+            return probe.CanStart ? 0 : StartupPreflight.ExitCodeNoDevice;
+        }
+
         var single = new SingleInstance(takeOver: args.Contains("--reload"));
         if (!single.IsOwner)
         {
@@ -44,6 +66,39 @@ internal static class Program
             single.Dispose();
             return 0;
         }
+
+        // THE STARTUP GATE.
+        //
+        // The Rokid Max has to be plugged in before the app starts, so
+        // the glasses are checked HERE - before a single window, tray
+        // icon or thread exists.  If they are not there, the virtual
+        // display is taken off the desktop (a crashed previous session
+        // can leave one behind), the user is told what to do, and the
+        // app quits instead of pretending to work.
+        //
+        // The gate runs AFTER the single-instance check, so that a
+        // second copy of a running app never puts a dialog in the
+        // user's face - it just asks the running one to show itself.
+        //
+        // The gate owns the single-instance mutex from here on, so it
+        // has to release it on the way out.
+        //
+        // "--no-device" forces the refusal branch, so the path can be
+        // exercised on a machine where the glasses ARE plugged in.
+        var preflight = StartupPreflight.Evaluate(args.Contains("--no-device"));
+        if (!preflight.CanStart)
+        {
+            StartupPreflight.Log("Startup refused: the Rokid Max is not connected.");
+            StartupPreflight.Log(preflight.Detail);
+
+            StartupPreflight.ShowRefusal(preflight);
+
+            single.ReleaseOwnership();
+            single.Dispose();
+            return StartupPreflight.ExitCodeNoDevice;
+        }
+
+        StartupPreflight.Log($"Startup preflight passed: {preflight.Detail}");
 
         var settingsService = new SettingsService();
         settingsService.Load();
