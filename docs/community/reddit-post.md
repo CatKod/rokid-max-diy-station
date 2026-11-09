@@ -9,7 +9,7 @@ So I built my own.
 ---
 
 **Repo:** https://github.com/CatKod/rokid-max-diy-station
-**Download (single .exe, no .NET install needed):** https://github.com/CatKod/rokid-max-diy-station/releases/tag/v0.3.2
+**Download (single .exe, no .NET install needed):** https://github.com/CatKod/rokid-max-diy-station/releases/tag/v0.3.3
 
 ---
 
@@ -25,6 +25,7 @@ Concretely:
 - Draws a 3D mouse cursor in the scene, adjustable from 0.25× to 4.0×, applied live
 - Works with **any** Windows app, not just Chromium-based ones
 - Runs in the system tray with optional autostart, and has a **reload** action for when it gets into a bad state
+- Checks at startup that the Rokid Max is actually connected, and says so plainly instead of sitting in the tray doing nothing
 - Also emits the head pose as a FreeTrack-compatible UDP stream, so OpenTrack / flight sims / space sims can use the glasses as a head tracker
 
 ## How it actually works (the interesting part)
@@ -60,6 +61,7 @@ These are real — the panel screenshot is the exact pixel data from the D3D11 b
 ## Honest limitations
 
 - The virtual display driver (VirtualDrivers.Virtual-Display-Driver) is a separate install and needs admin rights **once**. After that, the app attaches and detaches it at runtime without elevation.
+- **The glasses must be plugged in before you start the app.** The app checks this at startup and refuses to run without them — the panel is drawn on the glasses' own display, so there is nothing to show without them.
 - The driver is not WHQL-signed and **does not work on Windows 11 ARM64**.
 - Windows still opens new windows on your primary display by default — you drag them over, or use Win+Shift+Arrow.
 - The system tray stays on your primary display.
