@@ -187,29 +187,6 @@ physical screen and the mouse feels lost. This one key brings it home.
 It uses `MOD_NOREPEAT`, so holding it down does not yank the cursor back
 repeatedly.
 
-### Why not `Fn`?
-
-`Fn+C` was the original request for this project, and it is **not possible
-on a laptop**. The reason is worth understanding, because it is a hardware
-boundary, not a software limitation:
-
-> The `Fn` key is not a key the operating system ever sees.
-
-`Fn` is handled by the laptop's **embedded controller** (EC) — a
-microcontroller in the keyboard firmware. Measured with a low-level
-keyboard hook on the development machine, pressing `Fn` alone produces
-**no keyboard event at all**, and Windows has no `VK_FN` virtual-key code
-for `RegisterHotKey` to use. The EC only intercepts `Fn+<key>`
-*combinations* and converts them into the laptop's own functions —
-brightness, volume, the numeric keypad, Airplane mode — in firmware,
-before Windows ever sees the keystroke. Which combinations it intercepts
-is a **BIOS setting**, not something an application can influence.
-
-`Ctrl+Shift+Win+Alt` is the most-modified combination Windows offers that
-still produces a real key event, so that is what the app uses.
-
----
-
 ## 🎛️ The tray menu
 
 Right-click the cyan "R" in the system tray:
