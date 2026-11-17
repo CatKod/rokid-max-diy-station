@@ -187,6 +187,8 @@ physical screen and the mouse feels lost. This one key brings it home.
 It uses `MOD_NOREPEAT`, so holding it down does not yank the cursor back
 repeatedly.
 
+---
+
 ## 🎛️ The tray menu
 
 Right-click the cyan "R" in the system tray:
